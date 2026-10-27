@@ -1353,6 +1353,12 @@ FocusScope {
 
         StatusBar {
             info: root.debugStats || (root.currentIsGliff && !root.currentEnded ? (Sessions.stats[root.currentTab] || "") : "")
+            captureState: {
+                if (root.currentTab === "home") return ""
+                var index = root.openTabs.indexOf(root.currentTab)
+                var loader = index >= 0 ? tabViews.itemAt(index) : null
+                return loader && loader.item ? loader.item.captureState : ""
+            }
             id: statusBar
             Layout.fillWidth: true
             // A broken connections.json stays on screen: nothing is saved until it is fixed.

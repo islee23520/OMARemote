@@ -71,6 +71,8 @@ struct State
 	UINT32 width = 0;
 	UINT32 height = 0;
 	bool connected = false;
+	// Runtime capture widens the stored GrabKeyboard permission without changing that setting.
+	bool captureGranted = false;
 
 	DispClientContext* disp = nullptr;
 	bool dispReady = false;
@@ -147,6 +149,7 @@ static bool open_socket(State* st)
 	st->link.onAttach = [st] { replay(st); };
 	// The main loop waits on the client's descriptor through a winpr event; keep it current.
 	st->link.onClientChanged = [st] {
+		st->captureGranted = false;
 		if (st->clientEvent)
 			CloseHandle(st->clientEvent);
 		st->clientEvent = st->link.attached()
@@ -476,13 +479,18 @@ static void handle_line(rdpContext* ctx, const std::string& line)
 	else if (cmd == "key" && live && w.size() >= 3)
 	{
 		// The connection's Super key setting (+grab-keyboard): off, Super stays Hyprland's and
-		// never reaches Windows, where a lone press opens the Start menu.
+		// never reaches Windows, where a lone press opens the Start menu. Only presses are
+		// gated: a release must always go up, or a Super held while the shortcuts were ours
+		// stays pressed on Windows after they stop being ours ("capture 0" may have arrived
+		// first).
+		const bool down = num(1) != 0;
 		const auto evdev = static_cast<UINT32>(num(2));
-		if ((evdev == 125 || evdev == 126) && !freerdp_settings_get_bool(ctx->settings, FreeRDP_GrabKeyboard))
+		if (down && (evdev == 125 || evdev == 126) && !st->captureGranted &&
+		    !freerdp_settings_get_bool(ctx->settings, FreeRDP_GrabKeyboard))
 			return;
 		const UINT32 code = rdp_scancode(evdev);
 		if (code)
-			freerdp_input_send_keyboard_event_ex(input, num(1) != 0, FALSE, code);
+			freerdp_input_send_keyboard_event_ex(input, down, FALSE, code);
 	}
 	else if (cmd == "focus" && live && w.size() >= 2)
 		freerdp_input_send_focus_in_event(input, static_cast<UINT16>(num(1)));
@@ -504,6 +512,8 @@ static void handle_line(rdpContext* ctx, const std::string& line)
 		if (st->clip && st->clipReady)
 			clip_send_format_list(st);
 	}
+	else if (cmd == "capture" && w.size() == 2 && (w[1] == "0" || w[1] == "1"))
+		st->captureGranted = w[1] == "1";
 	else if (cmd == "disconnect")
 	{
 		st->quit = true;

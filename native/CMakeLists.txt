@@ -105,3 +105,12 @@ find_package(Qt6 REQUIRED COMPONENTS GuiPrivate)
 target_link_libraries(omaremote_plugin PRIVATE Qt6::Quick Qt6::GuiPrivate PkgConfig::WAYLAND PkgConfig::EGL PkgConfig::VA)
 target_include_directories(omaremote_plugin PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/plugin ${INHIBIT_GEN})
 target_compile_options(omaremote_plugin PRIVATE -Wall -Wextra)
+
+# Keyboard boundary regression: QT_QPA_PLATFORM=offscreen native/build/rdpview-keys-test.
+add_executable(rdpview-keys-test plugin/rdpview-keys-test.cpp plugin/rdpview.cpp plugin/shortcutinhibit.cpp
+                             plugin/clipread.cpp plugin/yuvnode.cpp
+                             ${INHIBIT_GEN}/keyboard-shortcuts-inhibit-unstable-v1-client-protocol.h
+                             ${INHIBIT_GEN}/keyboard-shortcuts-inhibit-unstable-v1-protocol.c)
+target_include_directories(rdpview-keys-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/plugin ${INHIBIT_GEN})
+target_link_libraries(rdpview-keys-test PRIVATE Qt6::Quick Qt6::GuiPrivate PkgConfig::WAYLAND PkgConfig::EGL PkgConfig::VA)
+target_compile_options(rdpview-keys-test PRIVATE -Wall -Wextra)

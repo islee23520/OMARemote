@@ -141,6 +141,7 @@ DEFAULTS = {
     "microphone": False,
     "homeDrive": False,
     "grabKeyboard": False,
+    "keyCapture": "auto",     # auto | on | off
     "security": "auto",      # auto | nla | tls | rdp
     "ignoreCert": False,
     "network": "auto",       # auto | lan | broadband | modem
@@ -234,7 +235,7 @@ def migrate_legacy():
 # Settings a group can set for its connections. A connection stores only what differs from what
 # it inherits, so changing the group changes every connection that did not override it.
 SETTING_KEYS = ("display", "fullscreen", "width", "height", "scale", "multimon", "clipboard", "audio", "microphone",
-                "homeDrive", "grabKeyboard", "security", "ignoreCert", "network", "gateway",
+                "homeDrive", "grabKeyboard", "keyCapture", "security", "ignoreCert", "network", "gateway",
                 "gatewayUser", "gatewayDomain", "kdc", "extraArgs", "openIn",
                 "vncScaling", "vncQuality", "viewOnly", "unlockAfter")
 
@@ -281,6 +282,10 @@ def resolve(conn, data):
     out = dict(DEFAULTS)
     out.update({k: v for k, v in (group.get("settings") or {}).items() if k in SETTING_KEYS})
     out.update(conn)
+    key_capture = out.get("keyCapture", "auto")
+    if key_capture not in ("auto", "on", "off"):
+        raise ValueError(f"invalid keyCapture setting: {key_capture!r}")
+    out["keyCapture"] = key_capture
     if not conn.get("port"):
         out["port"] = DEFAULT_PORTS.get(out.get("protocol") or "rdp", 3389)
 

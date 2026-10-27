@@ -652,6 +652,17 @@ Rectangle {
                     }
                 }
                 FormRow {
+                    inherited: root.fromGroup("keyCapture")
+                    label: "Keyboard capture"
+                    visible: root.isRdp || root.isVnc || root.isGliff
+                    help: "Focused desktop consumes keys, including compositor shortcuts. Requires Wayland shortcut-inhibit support; " + Keymap.session("ctrl+alt+escape") + " releases capture. For RDP this affects Super key delivery."
+                    Segment {
+                        value: root.d.keyCapture || "auto"
+                        options: [{ value: "auto", label: "Auto" }, { value: "on", label: "On" }, { value: "off", label: "Off" }]
+                        onPicked: function (v) { root.set("keyCapture", v) }
+                    }
+                }
+                FormRow {
                     inherited: root.fromGroup("unlockAfter")
                     label: "Unlock on return"
                     visible: root.isRdp
