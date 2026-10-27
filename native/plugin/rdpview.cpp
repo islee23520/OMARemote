@@ -666,14 +666,21 @@ void RdpView::itemChange(ItemChange change, const ItemChangeData& value)
 	}
 }
 
-bool RdpView::captureEligible() const
+// The asking, without the release latch: a live session, the keyboard, and the mode's own
+// conditions (the pointer on the picture for "auto").
+bool RdpView::asksForShortcuts() const
 {
-	if (m_keyCaptureMode == QLatin1String("off") || m_released || m_fd < 0 ||
+	if (m_keyCaptureMode == QLatin1String("off") || m_fd < 0 ||
 	    m_state == QLatin1String("ended") || m_state == QLatin1String("failed"))
 		return false;
 	if (!hasActiveFocus() || !isVisible() || !window() || !window()->isActive())
 		return false;
 	return m_keyCaptureMode == QLatin1String("on") || (m_captureShortcuts && m_pointerInside);
+}
+
+bool RdpView::captureEligible() const
+{
+	return !m_released && asksForShortcuts();
 }
 
 QString RdpView::captureState() const
@@ -692,7 +699,9 @@ void RdpView::updateCaptureState()
 	if (m_keyCaptureMode == QLatin1String("off"))
 		next = QStringLiteral("off");
 	else if (!captureEligible())
-		next = QStringLiteral("ineligible");
+		// The latch alone keeps a still-asking view from the shortcuts; anything else (focus,
+		// hidden, the session gone) is plain ineligibility whatever the latch says.
+		next = m_released && asksForShortcuts() ? QStringLiteral("released") : QStringLiteral("ineligible");
 	else if (!ShortcutInhibit::supported())
 		next = QStringLiteral("unsupported");
 	else
@@ -757,6 +766,16 @@ void RdpView::releaseShortcuts()
 	if (!shortcutsCaptured())
 		return;
 	m_released = true;
+	updateCapture();
+}
+
+void RdpView::rearmShortcuts()
+{
+	// The release key's counterpart: the latch is the only thing keeping a still-asking view
+	// from the shortcuts (a click, the pointer re-entering or focus arriving does the same).
+	if (!m_released)
+		return;
+	m_released = false;
 	updateCapture();
 }
 
