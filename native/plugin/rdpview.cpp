@@ -648,7 +648,7 @@ void RdpView::itemChange(ItemChange change, const ItemChangeData& value)
 		scheduleSize();
 	if (change == ItemSceneChange)
 	{
-		if (m_inhibit.held())
+		if (m_inhibit.held() || m_buttons != Qt::NoButton)
 			loseKeyboard();
 		m_inhibit.release(); // held for the old window
 		if (value.window)
@@ -666,14 +666,21 @@ void RdpView::itemChange(ItemChange change, const ItemChangeData& value)
 	}
 }
 
-bool RdpView::captureEligible() const
+// The asking, without the release latch: a live session, the keyboard, and the mode's own
+// conditions (the pointer on the picture for "auto").
+bool RdpView::asksForShortcuts() const
 {
-	if (m_keyCaptureMode == QLatin1String("off") || m_released || m_fd < 0 ||
+	if (m_keyCaptureMode == QLatin1String("off") || m_fd < 0 ||
 	    m_state == QLatin1String("ended") || m_state == QLatin1String("failed"))
 		return false;
 	if (!hasActiveFocus() || !isVisible() || !window() || !window()->isActive())
 		return false;
 	return m_keyCaptureMode == QLatin1String("on") || (m_captureShortcuts && m_pointerInside);
+}
+
+bool RdpView::captureEligible() const
+{
+	return !m_released && asksForShortcuts();
 }
 
 QString RdpView::captureState() const
@@ -692,7 +699,9 @@ void RdpView::updateCaptureState()
 	if (m_keyCaptureMode == QLatin1String("off"))
 		next = QStringLiteral("off");
 	else if (!captureEligible())
-		next = QStringLiteral("ineligible");
+		// The latch alone keeps a still-asking view from the shortcuts; anything else (focus,
+		// hidden, the session gone) is plain ineligibility whatever the latch says.
+		next = m_released && asksForShortcuts() ? QStringLiteral("released") : QStringLiteral("ineligible");
 	else if (!ShortcutInhibit::supported())
 		next = QStringLiteral("unsupported");
 	else
@@ -727,7 +736,7 @@ void RdpView::onInhibitActivation()
 void RdpView::updateCapture()
 {
 	const bool held = m_inhibit.held();
-	const bool hadKeys = held || !m_pressed.isEmpty() || !m_chords.isEmpty();
+	const bool hadInput = held || !m_pressed.isEmpty() || !m_chords.isEmpty() || m_buttons != Qt::NoButton;
 	if (captureEligible())
 		m_inhibit.inhibit(window());
 	else
@@ -736,7 +745,7 @@ void RdpView::updateCapture()
 	// window deactivated): no release can arrive for keys still held, and the compositor
 	// restored its own shortcuts without a word. The release key and the pointer leaving
 	// ("auto") keep the keyboard; their keys are lifted where those events are handled.
-	if (hadKeys && !m_inhibit.held() &&
+	if (hadInput && !m_inhibit.held() &&
 	    (!hasActiveFocus() || !isVisible() || !window() || !window()->isActive()))
 		loseKeyboard();
 	updateCaptureState();
@@ -748,6 +757,9 @@ void RdpView::loseKeyboard()
 	const bool blur = !m_keyboardBlurred;
 	m_keyboardBlurred = true;
 	releaseAllKeys();
+	// The buttons go with the keyboard: whatever took the window or the grab away leaves no
+	// release to come, and a remote button left down selects or drags by itself.
+	releaseHeldButtons();
 	if (blur)
 		send("blur");
 }
@@ -757,6 +769,16 @@ void RdpView::releaseShortcuts()
 	if (!shortcutsCaptured())
 		return;
 	m_released = true;
+	updateCapture();
+}
+
+void RdpView::rearmShortcuts()
+{
+	// The release key's counterpart: the latch is the only thing keeping a still-asking view
+	// from the shortcuts (a click, the pointer re-entering or focus arriving does the same).
+	if (!m_released)
+		return;
+	m_released = false;
 	updateCapture();
 }
 
@@ -844,7 +866,11 @@ void RdpView::mousePressEvent(QMouseEvent* e)
 	const int b = buttonNumber(e->button());
 	const QPoint p = toRemote(e->position());
 	if (b)
+	{
+		m_buttons |= e->button();
+		m_lastRemotePos = p;
 		send("button " + QByteArray::number(b) + " 1 " + QByteArray::number(p.x()) + ' ' + QByteArray::number(p.y()));
+	}
 	e->accept();
 }
 
@@ -852,16 +878,42 @@ void RdpView::mouseReleaseEvent(QMouseEvent* e)
 {
 	const int b = buttonNumber(e->button());
 	const QPoint p = toRemote(e->position());
-	if (b)
+	if (b && m_buttons.testFlag(e->button()))
+	{
+		m_buttons &= ~e->button();
+		m_lastRemotePos = p;
 		send("button " + QByteArray::number(b) + " 0 " + QByteArray::number(p.x()) + ' ' + QByteArray::number(p.y()));
+	}
 	e->accept();
 }
 
 void RdpView::mouseMoveEvent(QMouseEvent* e)
 {
 	const QPoint p = toRemote(e->position());
+	m_lastRemotePos = p;
 	send("mouse " + QByteArray::number(p.x()) + ' ' + QByteArray::number(p.y()));
 	e->accept();
+}
+
+// A cancelled grab will not deliver the matching release. Crossing the item's edge is not
+// cancellation: Qt's implicit grab keeps an ordinary drag alive outside the picture.
+void RdpView::mouseUngrabEvent()
+{
+	releaseHeldButtons();
+	QQuickItem::mouseUngrabEvent();
+}
+
+// Clear before sending: a dead socket can recursively detach during cleanup. Late physical
+// releases then find no tracked press and cannot double-release into this or a new session.
+void RdpView::releaseHeldButtons()
+{
+	const Qt::MouseButtons held = std::exchange(m_buttons, Qt::MouseButtons());
+	for (Qt::MouseButton b : { Qt::LeftButton, Qt::RightButton, Qt::MiddleButton, Qt::BackButton, Qt::ForwardButton })
+	{
+		if (held.testFlag(b))
+			send("button " + QByteArray::number(buttonNumber(b)) + " 0 " + QByteArray::number(m_lastRemotePos.x()) + ' ' +
+			     QByteArray::number(m_lastRemotePos.y()));
+	}
 }
 
 // The shortcuts follow the pointer, as in Gliff's own client: taken when it comes onto the picture,
@@ -898,6 +950,7 @@ void RdpView::hoverLeaveEvent(QHoverEvent* e)
 void RdpView::hoverMoveEvent(QHoverEvent* e)
 {
 	const QPoint p = toRemote(e->position());
+	m_lastRemotePos = p;
 	send("mouse " + QByteArray::number(p.x()) + ' ' + QByteArray::number(p.y()));
 	e->accept();
 }
@@ -905,6 +958,7 @@ void RdpView::hoverMoveEvent(QHoverEvent* e)
 void RdpView::wheelEvent(QWheelEvent* e)
 {
 	const QPoint p = toRemote(e->position());
+	m_lastRemotePos = p;
 	const QPoint d = e->angleDelta();
 	if (!d.isNull())
 		send("wheel " + QByteArray::number(d.y()) + ' ' + QByteArray::number(d.x()) + ' ' + QByteArray::number(p.x()) +

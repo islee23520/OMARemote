@@ -16,7 +16,7 @@ Rectangle {
     readonly property var statsParts: Format.statsParts(stats).slice(statsReason ? 1 : 0)
     property bool statsOpen: false
     property string captureState: ""
-    readonly property bool showCapture: ["active", "inactive", "ineligible", "unsupported"].indexOf(captureState) >= 0
+    readonly property bool showCapture: ["active", "inactive", "released", "ineligible", "unsupported"].indexOf(captureState) >= 0
     onShowStatsChanged: if (!showStats) statsOpen = false
     readonly property color statsColor: !stats ? Theme.muted : stats.health === "bad" ? Theme.urgent
                                         : stats.health === "warn" ? Theme.warning : Theme.success
@@ -108,6 +108,7 @@ Rectangle {
                 textFormat: Text.PlainText
                 text: root.captureState === "active" ? "⌨ captured"
                     : root.captureState === "inactive" ? "⌨ idle"
+                    : root.captureState === "released" ? "⌨ released"
                     : root.captureState === "unsupported" ? "⌨ unsupported" : "⌨ unavailable"
                 color: root.captureState === "active" ? Theme.accent : Theme.muted
                 font.family: Theme.font

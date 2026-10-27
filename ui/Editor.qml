@@ -698,7 +698,7 @@ Rectangle {
                     inherited: root.fromGroup("keyCapture")
                     label: "Keyboard capture"
                     visible: root.isRdp || root.isVnc || root.isGliff
-                    help: "Focused desktop consumes keys, including compositor shortcuts. Requires Wayland shortcut-inhibit support; " + Keymap.session("ctrl+alt+escape") + " releases capture. For RDP this affects Super key delivery."
+                    help: "Focused desktop consumes keys, including compositor shortcuts. Requires Wayland shortcut-inhibit support; " + Keymap.session("ctrl+alt+escape") + " releases capture and " + Keymap.session("ctrl+alt+g") + " toggles it. For RDP this affects Super key delivery."
                     Segment {
                         value: root.d.keyCapture || "auto"
                         options: [{ value: "auto", label: "Auto" }, { value: "on", label: "On" }, { value: "off", label: "Off" }]

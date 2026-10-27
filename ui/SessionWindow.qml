@@ -253,8 +253,9 @@ FocusScope {
             hints: (root.hotkey ? [["ctrl+alt+h", "hide"]] : []).concat([["ctrl+alt+t", "to a tab"], ["ctrl+alt+⏎", "fullscreen"],
                     root.session && root.session.protocol === "ssh" ? ["ctrl+shift+c/v", "copy/paste"]
                     : root.session && root.session.protocol === "gliff" ? Format.gliffKeyHint(Sessions.capturedSession === root.session.id)
-                    : ["ctrl+alt+end", "ctrl+alt+del"],
-                    ["ctrl+alt+home", "to connections"], [Sessions.closeKey, "disconnect"]])
+                    : ["ctrl+alt+end", "ctrl+alt+del"]])
+                    .concat(view.canToggleCapture ? [["ctrl+alt+g", "capture"]] : [])
+                    .concat([["ctrl+alt+home", "to connections"], [Sessions.closeKey, "disconnect"]])
         }
     }
 

@@ -50,10 +50,11 @@ class RdpView : public QQuickItem
 	// view is not asking (focus, hidden, window inactive, session not live, pointer off the
 	// picture, the release key latched); "unsupported" the compositor offers the protocol
 	// neither; "inactive" it is asked but not held (not confirmed, not creatable, or the
-	// compositor took it back — its `inactive`); "active" the compositor's `active` event:
-	// every key, Super included, is ours. Losing the keyboard restores the compositor's
-	// shortcuts without an event, so eligibility is re-checked before an "active" is believed
-	// and losing the keyboard ends it here.
+	// compositor took it back — its `inactive`); "released" the release key or chord gave them
+	// back and only a click, the pointer re-entering, focus or rearmShortcuts takes them again;
+	// "active" the compositor's `active` event: every key, Super included, is ours. Losing the
+	// keyboard restores the compositor's shortcuts without an event, so eligibility is
+	// re-checked before an "active" is believed and losing the keyboard ends it here.
 	Q_PROPERTY(QString captureState READ captureState NOTIFY captureStateChanged)
 	// Whether the compositor's shortcuts are held right now (captureState === "active").
 	Q_PROPERTY(bool shortcutsCaptured READ shortcutsCaptured NOTIFY shortcutsCapturedChanged)
@@ -121,6 +122,10 @@ public:
 	// A lost SSH connection that is being tried again: try at once, or give it up.
 	Q_INVOKABLE void reconnectNow();
 	Q_INVOKABLE void cancelReconnect();
+	// The shortcuts back after the release key or chord gave them up: as a click on the picture
+	// would, without needing the mouse. No-op unless they were given up by the release latch
+	// (a view not asking for them — focus lost, mode off — stays as it is).
+	Q_INVOKABLE void rearmShortcuts();
 	// Hyprland's shortcuts back, while the pointer stays on the picture (the session keys + Esc).
 	Q_INVOKABLE void releaseShortcuts();
 	Q_INVOKABLE int cachedCursors() const { return int(m_cursors.size()); } // for tests
@@ -161,6 +166,7 @@ protected:
 	void hoverMoveEvent(QHoverEvent* event) override;
 	void hoverEnterEvent(QHoverEvent* event) override;
 	void hoverLeaveEvent(QHoverEvent* event) override;
+	void mouseUngrabEvent() override;
 	void wheelEvent(QWheelEvent* event) override;
 	void focusInEvent(QFocusEvent* event) override;
 	void focusOutEvent(QFocusEvent* event) override;
@@ -183,10 +189,12 @@ private:
 	void sendClipboard(bool force = false);
 	void offerClipboard(const QString& text, bool force);
 	void updateCapture();
+	bool asksForShortcuts() const; // the asking without the release latch (captureEligible minus it)
 	bool captureEligible() const; // whether this view asks for the shortcuts, before the compositor's say
 	void updateCaptureState();
 	void onInhibitActivation(); // the compositor's active/inactive arrived
 	void loseKeyboard(); // keys lifted and the session told it lost the keyboard
+	void releaseHeldButtons(); // buttons lifted at their last remote place, once per press
 	QRectF imageRect() const;
 	QPoint toRemote(const QPointF& p) const;
 	qreal devicePixelRatio() const;
@@ -263,5 +271,9 @@ private:
 	bool m_clipReading = false; // a read is under way; one more follows it when asked meanwhile
 	bool m_clipAgain = false;
 	bool m_clipAgainForce = false;
-	Qt::MouseButtons m_buttons;
+	// Buttons pressed on the remote through this view, and where the pointer was last sent: a
+	// drag may legitimately run past the item's edge, so leaving lifts nothing, but a lost
+	// grab, keyboard, window or session lifts them (a remote button left down drags alone).
+	Qt::MouseButtons m_buttons = Qt::NoButton;
+	QPoint m_lastRemotePos;
 };

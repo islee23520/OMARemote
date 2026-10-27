@@ -210,6 +210,7 @@ chose. The status bar and the keymap sheet show the keys as they are.
 | `ctrl+alt+pgup` / `pgdn` | previous / next tab |
 | `ctrl+alt+end` | send ctrl+alt+del |
 | `ctrl+alt+escape` | release keyboard capture (configured session chord; let compositor shortcuts through) |
+| `ctrl+alt+g` | toggle keyboard capture in RDP, VNC and Gliff when enabled: release while captured, take it back after; passed through in SSH |
 | `ctrl+alt+⏎` | fullscreen, as SUPER+F (the Omarchy bar hidden, tabs and pinned list kept) |
 | `ctrl+alt+o` | move the session to its own window (`ctrl+alt+t` there: back into a tab) |
 | `ctrl+alt+w` | disconnect: close the tab (or its own window) |
@@ -340,7 +341,8 @@ already, listed twice or not usable say so. The keymap sheet (`?`) runs them too
 **Keyboard capture** (RDP, VNC and Gliff): *Auto* keeps the existing Gliff-only behavior; *On*
 captures keys while a desktop tab is focused, including compositor shortcuts, and *Off* disables
 capture. It needs Wayland shortcut-inhibit support. The configured session release chord lets keys reach
-the compositor. The existing extra-release preference applies to captured desktop sessions too. For
+the compositor, and `ctrl+alt+g` toggles capture: release while captured, take it back after. The
+existing extra-release preference applies to captured desktop sessions too. For
 RDP, capture determines whether the separate **Super key** setting can send Super to the remote.
 
 **Input profile and mappings** (RDP, VNC, Gliff): choose Default, Windows, Linux, macOS or Custom
@@ -533,7 +535,8 @@ accept ssh from yours, as for an SSH connection.
 - **Keys**: your own keyboard layout goes along. While the tab has the keyboard and the pointer is
   on the picture, the tab takes Hyprland's shortcuts, `super` included, as Gliff's own client does.
   Moving the pointer off gives them back, and so do `ctrl+alt+esc` and `shift+esc` (Settings ›
-  Keyboard: or *Double Esc*, or nothing else); a click takes them again.
+  Keyboard: or *Double Esc*, or nothing else); a click takes them again, and so does `ctrl+alt+g`,
+  which takes them back after a release too.
 - **Clipboard** both ways, text, images and files: nothing moves until you paste, slow pastes show
   their progress with a cancel button, files land in `~/.cache/omaremote/clipboard/`. It is shared
   only while the tab has the keyboard, and never a password manager's selection.
