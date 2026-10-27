@@ -209,7 +209,7 @@ chose. The status bar and the keymap sheet show the keys as they are.
 | `ctrl+alt+home` | back to the connections tab |
 | `ctrl+alt+pgup` / `pgdn` | previous / next tab |
 | `ctrl+alt+end` | send ctrl+alt+del |
-| `ctrl+alt+r` | RDP: reconnect, so a locked desktop comes back signed in |
+| `ctrl+alt+escape` | release keyboard capture (configured session chord; let compositor shortcuts through) |
 | `ctrl+alt+⏎` | fullscreen, as SUPER+F (the Omarchy bar hidden, tabs and pinned list kept) |
 | `ctrl+alt+o` | move the session to its own window (`ctrl+alt+t` there: back into a tab) |
 | `ctrl+alt+w` | disconnect: close the tab (or its own window) |
@@ -336,6 +336,12 @@ already, listed twice or not usable say so. The keymap sheet (`?`) runs them too
   or *New credential set…*.
 - A connection is built as defaults → group settings → its own values, and stores only what differs
   from what it inherits; settings that come from the group are marked "· group" in the editor.
+
+**Keyboard capture** (RDP, VNC and Gliff): *Auto* keeps the existing Gliff-only behavior; *On*
+captures keys while a desktop tab is focused, including compositor shortcuts, and *Off* disables
+capture. It needs Wayland shortcut-inhibit support. The configured session release chord lets keys reach
+the compositor. The existing extra-release preference applies to captured desktop sessions too. For
+RDP, capture determines whether the separate **Super key** setting can send Super to the remote.
 
 ## RDP
 

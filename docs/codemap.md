@@ -78,7 +78,7 @@ The manager window:
 | --- | --- |
 | plugin/rdpview.cpp | the QML item drawing a session: frame, keys (`keyPressEvent`, chords for sent shortcuts), mouse, clipboard (`shareClipboard`, `sendClipboard` through clipread, `MaxClipBytes` both ways), cursor |
 | plugin/yuvnode.cpp, plugin/shaders/yuv.* | Gliff pictures drawn from the decoder's dmabufs: EGL import, the shader converts (BT.709, Dual420 recombined); RdpView `addSurface`, `showSurfaces`, `updatePaintNode` |
-| plugin/shortcutinhibit.cpp | keyboard-shortcuts-inhibit for Gliff tabs (`captureShortcuts`, release key in rdpview.cpp `keyPressEvent`) |
+| plugin/shortcutinhibit.cpp | Wayland keyboard-shortcuts inhibition: actual `active`/`inactive` events; RdpView mode/focus gating and key cleanup; `plugin/rdpview-keys-test.cpp` = offscreen `rdpview-keys-test` keyboard boundary regression |
 | plugin/clipread.cpp | `oma::readClipboard`: the only way the UI reads the clipboard (wl-paste in its own process, size and time limits); never `QClipboard::text()` (tests/test_clipboard.py checks) |
 | plugin/pasteguard.cpp | `PasteGuard.guard` (cuts a field loose from clipboard changes), `paste` (wl-paste, 16 KiB, 2 s, one line; refused whole when it does not fit `maximumLength`) |
 | rdp/main.cpp | FreeRDP client: `handle_line` (UI lines: key, mouse, clip, size), `rdp_scancode` |

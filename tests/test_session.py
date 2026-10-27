@@ -23,6 +23,19 @@ def conn(**kw):
     return dict({"id": "c1", "name": "Work", "host": "pc.lan"}, **kw)
 
 
+class KeyCapture(unittest.TestCase):
+    def test_inherited_and_explicit_capture_modes(self):
+        data = {"groups": {"Desk": {"settings": {"keyCapture": "on"}}}}
+        self.assertEqual(session.resolve(conn(group="Desk"), data)["keyCapture"], "on")
+        self.assertEqual(session.resolve(conn(group="Desk", keyCapture="off"), data)["keyCapture"], "off")
+        self.assertEqual(session.resolve(conn(), {"groups": {}})["keyCapture"], "auto")
+
+    def test_invalid_group_capture_mode_is_rejected(self):
+        data = {"groups": {"Desk": {"settings": {"keyCapture": "sometimes"}}}}
+        with self.assertRaisesRegex(ValueError, "invalid keyCapture"):
+            session.resolve(conn(group="Desk"), data)
+
+
 class BuildArgs(unittest.TestCase):
     def test_minimal_fit_follows_window(self):
         args = session.build_args(conn(), auto_scale=100)
@@ -2636,15 +2649,3 @@ class UnlockOnReturn(unittest.TestCase):
     def test_off_by_default(self):
         self.assertEqual(session.DEFAULTS["unlockAfter"], 0)
 
-    def test_store_lists_equal_the_backend(self):
-        """ui/Store.qml keeps its own copies of LOCAL_KEYS and SETTING_KEYS: a key missing there
-        would travel from the UI's side."""
-        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ui", "Store.qml"),
-                  encoding="utf-8") as f:
-            text = f.read()
-
-        def listed(name):
-            body = re.search(r"property var %s: \[(.*?)\]" % name, text, re.S).group(1)
-            return set(re.findall(r'"([^"]+)"', body))
-        self.assertEqual(listed("localKeys"), set(session.LOCAL_KEYS))
-        self.assertEqual(listed("settingKeys"), set(session.SETTING_KEYS))

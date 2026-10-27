@@ -325,6 +325,15 @@ Rectangle {
                     Segment { value: root.boolValue("grabKeyboard"); options: root.onOff; onPicked: function (v) { root.setBool("grabKeyboard", v) } }
                 }
                 FormRow {
+                    label: "Keyboard capture"
+                    help: "Focused desktop consumes keys, including compositor shortcuts. Requires Wayland shortcut-inhibit support; " + Keymap.session("ctrl+alt+escape") + " releases capture. For RDP this affects Super key delivery."
+                    Segment {
+                        value: root.value("keyCapture")
+                        options: root.notSet.concat([{ value: "auto", label: "Auto" }, { value: "on", label: "On" }, { value: "off", label: "Off" }])
+                        onPicked: function (v) { root.set("keyCapture", v) }
+                    }
+                }
+                FormRow {
                     label: "Unlock on return"
                     help: "Reconnect when back after"
                     Segment {
