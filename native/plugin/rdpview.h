@@ -39,18 +39,32 @@ class RdpView : public QQuickItem
 	Q_PROPERTY(int desktopScale READ desktopScale WRITE setDesktopScale NOTIFY desktopScaleChanged)
 	// When false the remote desktop keeps its size and the picture is scaled to the item.
 	Q_PROPERTY(bool followSize READ followSize WRITE setFollowSize NOTIFY followSizeChanged)
-	// Every key to the session, Super and Hyprland's shortcuts too, while the picture has the focus
-	// (Gliff tabs) and the pointer is over it, as in Gliff's own client. The session keys + Esc
-	// (releaseShortcuts) or the release key hand the shortcuts back until the pointer leaves or the
-	// picture is clicked.
+	// keyCaptureMode asks for the compositor's shortcuts, Super and Hyprland's own keys with
+	// them: "on" while the session is live and this view has the keyboard (the pointer's place
+	// is not the keyboard's), "auto" (the default) only while captureShortcuts is set and the
+	// pointer is on the picture (Gliff's own behaviour), "off" never. Anything else is "auto".
+	Q_PROPERTY(QString keyCaptureMode READ keyCaptureMode WRITE setKeyCaptureMode NOTIFY keyCaptureModeChanged)
+	// The "auto" request: whether the session's protocol wants every key (Gliff's switch).
 	Q_PROPERTY(bool captureShortcuts READ captureShortcuts WRITE setCaptureShortcuts NOTIFY captureShortcutsChanged)
-	// Whether the compositor's shortcuts are held right now.
+	// Truth about the shortcuts right now: "off" the mode never takes them; "ineligible" this
+	// view is not asking (focus, hidden, window inactive, session not live, pointer off the
+	// picture, the release key latched); "unsupported" the compositor offers the protocol
+	// neither; "inactive" it is asked but not held (not confirmed, not creatable, or the
+	// compositor took it back — its `inactive`); "active" the compositor's `active` event:
+	// every key, Super included, is ours. Losing the keyboard restores the compositor's
+	// shortcuts without an event, so eligibility is re-checked before an "active" is believed
+	// and losing the keyboard ends it here.
+	Q_PROPERTY(QString captureState READ captureState NOTIFY captureStateChanged)
+	// Whether the compositor's shortcuts are held right now (captureState === "active").
 	Q_PROPERTY(bool shortcutsCaptured READ shortcutsCaptured NOTIFY shortcutsCapturedChanged)
 	// A key that gives them back besides the session keys + Esc: shift+escape, double-escape or none.
 	Q_PROPERTY(QString releaseKey MEMBER m_releaseKey NOTIFY releaseKeyChanged)
-	// Whether this view passes the clipboard between the desktop and the session (the connection's
-	// Clipboard switch; Gliff's session process has its own). Off: the clipboard is never read,
-	// and text from the session never set.
+	// The session's protocol ("rdp", "vnc", "gliff", "ssh"), or "" when not told. Only "rdp"
+	// is acted on: while captureState is "active" the view sends "capture 1", which lets Super
+	// through to Windows until "capture 0"; the connection's stored +grab-keyboard setting
+	// stays the baseline underneath and is never changed at runtime.
+	Q_PROPERTY(QString sessionProtocol READ sessionProtocol WRITE setSessionProtocol NOTIFY sessionProtocolChanged)
+	// Off means neither reading the desktop clipboard nor setting text received from the session.
 	Q_PROPERTY(bool shareClipboard READ shareClipboard WRITE setShareClipboard NOTIFY shareClipboardChanged)
 
 public:
@@ -70,7 +84,12 @@ public:
 	void setFollowSize(bool follow);
 	bool captureShortcuts() const { return m_captureShortcuts; }
 	void setCaptureShortcuts(bool capture);
-	bool shortcutsCaptured() const { return m_inhibit.held(); }
+	QString keyCaptureMode() const { return m_keyCaptureMode; }
+	void setKeyCaptureMode(const QString& mode);
+	QString captureState() const;
+	QString sessionProtocol() const { return m_sessionProtocol; }
+	void setSessionProtocol(const QString& protocol);
+	bool shortcutsCaptured() const;
 	bool shareClipboard() const { return m_shareClipboard; }
 	void setShareClipboard(bool share);
 
@@ -109,6 +128,9 @@ signals:
 	void desktopScaleChanged();
 	void followSizeChanged();
 	void captureShortcutsChanged();
+	void keyCaptureModeChanged();
+	void captureStateChanged();
+	void sessionProtocolChanged();
 	void releaseKeyChanged();
 	void shareClipboardChanged();
 	// A paste from the remote that takes a while (Gliff): bytes so far, the total (0: unknown), what.
@@ -133,6 +155,7 @@ protected:
 	void hoverMoveEvent(QHoverEvent* event) override;
 	void hoverEnterEvent(QHoverEvent* event) override;
 	void hoverLeaveEvent(QHoverEvent* event) override;
+	void mouseUngrabEvent() override;
 	void wheelEvent(QWheelEvent* event) override;
 	void focusInEvent(QFocusEvent* event) override;
 	void focusOutEvent(QFocusEvent* event) override;
@@ -155,6 +178,11 @@ private:
 	void sendClipboard(bool force = false);
 	void offerClipboard(const QString& text, bool force);
 	void updateCapture();
+	bool captureEligible() const; // whether this view asks for the shortcuts, before the compositor's say
+	void updateCaptureState();
+	void onInhibitActivation(); // the compositor's active/inactive arrived
+	void loseKeyboard(); // keys lifted and the session told it lost the keyboard
+	void releaseHeldButtons(); // buttons lifted at their last remote place, once per press
 	QRectF imageRect() const;
 	QPoint toRemote(const QPointF& p) const;
 	qreal devicePixelRatio() const;
@@ -195,12 +223,19 @@ private:
 	int m_desktopScale = 0;
 	bool m_followSize = true;
 	bool m_captureShortcuts = false;
+	QString m_keyCaptureMode = QStringLiteral("auto");
+	QString m_sessionProtocol;
+	QString m_captureState = QStringLiteral("ineligible");
 	bool m_released = false; // the release key gave the shortcuts back; a click or leaving undoes it
-	bool m_pointerInside = false; // the shortcuts are taken only with the pointer on the picture
+	bool m_pointerInside = false; // "auto" takes the shortcuts only with the pointer on the picture
 	QString m_releaseKey = QStringLiteral("shift+escape");
 	qint64 m_lastEscape = 0; // for double-escape
 	ShortcutInhibit m_inhibit;
 	QSet<quint32> m_pressed;
+	// Keys lifted without their releases having arrived (the keyboard left while they were
+	// held): their repeats are not new presses, and a late release doubles nothing.
+	QSet<quint32> m_stalePressed;
+	bool m_keyboardBlurred = false;
 	// A key that came with modifiers no modifier key was pressed for (Hyprland's sendshortcut, as
 	// Omarchy's Super+V/C/X use): the modifiers sent around it, and a held Super lifted for it.
 	// evdev code and keysym of each, by the key's evdev code.
@@ -220,5 +255,9 @@ private:
 	bool m_clipReading = false; // a read is under way; one more follows it when asked meanwhile
 	bool m_clipAgain = false;
 	bool m_clipAgainForce = false;
-	Qt::MouseButtons m_buttons;
+	// Buttons pressed on the remote through this view, and where the pointer was last sent: a
+	// drag may legitimately run past the item's edge, so leaving lifts nothing, but a lost
+	// grab, keyboard, window or session lifts them (a remote button left down drags alone).
+	Qt::MouseButtons m_buttons = Qt::NoButton;
+	QPoint m_lastRemotePos;
 };
