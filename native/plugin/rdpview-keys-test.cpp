@@ -433,6 +433,36 @@ int main(int argc, char** argv)
 		expect(lines.count("key 1 30") == 2, "a press and its repeat are forwarded");
 		expect(lines.count("key 0 30") == 1, "the release is forwarded once");
 	}
+	// A key with no keysym (kb_options = caps:none: nativeVirtualKey 0xffffff, Qt key 0, no
+	// text) still tells VNC what it is when we know the code: CapsLock goes as XK_Caps_Lock.
+	// Unknown zero-keysyms keep the 0 they came with — the VNC side drops those.
+	{
+		Session s;
+		expect(s.start(path), "the stand-in session listens");
+		TestView v;
+		expect(s.acceptFrom(&v, path), "the view attaches");
+		v.setKeyCaptureMode(QStringLiteral("on"));
+		QKeyEvent caps = key(58, 0, true, false, Qt::NoModifier, 0xffffff);
+		v.keyPressEvent(&caps);
+		QKeyEvent capsUp = key(58, 0, false, false, Qt::NoModifier, 0xffffff);
+		v.keyReleaseEvent(&capsUp);
+		lines = s.heard();
+		expect(lines.count("key 1 58 65509\n") == 1,
+		       "keysym-less CapsLock is sent as XK_Caps_Lock (0xffe5 = 65509)");
+		expect(lines.count("key 0 58\n") == 1, "the CapsLock release is forwarded");
+		QKeyEvent capsZero = key(58, 0, true);
+		v.keyPressEvent(&capsZero);
+		QKeyEvent capsZeroUp = key(58, 0, false);
+		v.keyReleaseEvent(&capsZeroUp);
+		expect(s.heard().contains("key 1 58 65509\n"), "zero-keysym CapsLock uses XK_Caps_Lock");
+		QKeyEvent other = key(70, 0, true);
+		v.keyPressEvent(&other);
+		QKeyEvent otherUp = key(70, 0, false);
+		v.keyReleaseEvent(&otherUp);
+		lines = s.heard();
+		expect(lines.count("key 1 70 0\n") == 1,
+		       "an untabled zero-keysym key stays zero (VNC drops it, as before)");
+	}
 
 	// Focus loss lifts everything once and says blur; what is held over it comes back as
 	// repeats, which are not presses, and a late release doubles nothing.
