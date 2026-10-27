@@ -20,6 +20,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <map>
 #include <string>
@@ -51,6 +53,8 @@ struct Session
 	// ±120s; RFB has only whole button clicks, so what is left over waits here for the next
 	// event. Per axis and signed, so a direction change spends its residue before scrolling
 	// the other way.
+	// Scale thousandths; residues are angle units in the same fixed-point representation.
+	int wheelScale = 1000;
 	int wheelX = 0, wheelY = 0;
 	std::string remoteClip;
 	std::string localClip;
@@ -325,15 +329,16 @@ static void click(int mask, long x, long y)
 
 // One wheel click per full notch in the residue: spends as many 120s as it holds and keeps the
 // signed remainder for the next event.
+// Apply a bounded per-connection scale before accumulating full 120-unit RFB wheel notches.
 static void wheel_clicks(int& residue, int delta, int mask, long x, long y)
 {
-	long total = long(residue) + delta;
-	while (total >= 120 || total <= -120)
+	int64_t remaining = int64_t(residue) + int64_t(delta) * g.wheelScale;
+	while (remaining >= 120000 || remaining <= -120000)
 	{
-		click(total > 0 ? mask : mask << 1, x, y);
-		total += total > 0 ? -120 : 120;
+		click(remaining > 0 ? mask : mask << 1, x, y);
+		remaining += remaining > 0 ? -120000 : 120000;
 	}
-	residue = int(total);
+	residue = int(remaining);
 }
 
 static void handle_line(const std::string& line)
@@ -542,6 +547,11 @@ int main()
 		client->appData.qualityLevel = 7;
 		client->appData.enableJPEG = TRUE;
 	}
+	const std::string wheelScale = g.get("wheelScale", "1");
+	char* scaleEnd = nullptr;
+	double scale = strtod(wheelScale.c_str(), &scaleEnd);
+	if (scaleEnd && *scaleEnd == '\0' && std::isfinite(scale) && scale >= 0.25 && scale <= 8.0)
+		g.wheelScale = int(std::llround(scale * 1000.0));
 
 	client->serverHost = strdup(g.get("host").c_str());
 	client->serverPort = int(strtol(g.get("port", "5900").c_str(), nullptr, 10));

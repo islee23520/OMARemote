@@ -10,7 +10,7 @@ import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-HELPER = os.path.join(HERE, "..", "native", "build", "omaremote-vnc")
+HELPER = os.environ.get("OMAREMOTE_VNC", os.path.join(HERE, "..", "native", "build", "omaremote-vnc"))
 
 # A VNC server that stops in the middle of a message held omaremote-vnc inside libvncclient for
 # good, deaf to SIGTERM (found while testing omarchy-plugin-marketplace#11853): now a read gives

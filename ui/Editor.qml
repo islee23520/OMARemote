@@ -494,6 +494,23 @@ Rectangle {
                     }
                 }
                 FormRow {
+                    inherited: root.fromGroup("vncWheelScale")
+                    label: "Wheel sensitivity"
+                    help: "Scale VNC angle deltas (0.25–8×, 0.001× steps); default 1× preserves existing behavior."
+                    visible: root.isVnc
+                    Input {
+                        maximumLength: Limits.standard
+                        placeholderText: "1"
+                        text: String(root.d.vncWheelScale === undefined ? 1 : root.d.vncWheelScale)
+                        onTextEdited: {
+                            var n = Number(text)
+                            if (text.trim() !== "" && isFinite(n) && n >= 0.25 && n <= 8
+                                    && Math.abs(n * 1000 - Math.round(n * 1000)) < 1e-9)
+                                root.set("vncWheelScale", n)
+                        }
+                    }
+                }
+                FormRow {
                     inherited: root.fromGroup("viewOnly")
                     label: "View only"
                     help: "Watch without sending input"
