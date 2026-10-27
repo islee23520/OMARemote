@@ -26,8 +26,11 @@ ShellRoot {
                 return
             stop()
             var c = Store.connections.filter(function (c) { return c.id === "c1" })[0]
+            var copyId = c && c.inputProfile === "macos" ? Store.duplicate(c.id) : ""
+            var copy = copyId ? Store.storedGet(copyId) : null
             console.log("PROBE " + JSON.stringify({ loaded: Store.loaded, broken: Store.broken,
-                count: Store.stored.length, last: c ? c.lastConnected : null, port: c ? c.port : null }))
+                count: Store.stored.length, last: c ? c.lastConnected : null, port: c ? c.port : null,
+                copyProfile: copy ? copy.inputProfile : null, copyAction: copy ? copy.inputAction1 : null }))
             Store.setUi("pinned", true)
             done.start()
         }
@@ -125,6 +128,14 @@ class StoreFile(unittest.TestCase):
         data = json.loads(after)
         self.assertTrue(data["ui"]["pinned"])
         self.assertEqual(data["connections"][0]["lastConnected"], 100)
+
+    def test_profile_mapping_survives_duplicate_and_store_write(self):
+        text = json.dumps({"connections": [{"id": "c1", "host": "a.lan", "inputProfile": "macos",
+                                             "inputTrigger1": "58", "inputAction1": "29:65507+57:32"}]})
+        probe, after, _ = self.run_store(text)
+        self.assertEqual(probe["copyProfile"], "macos")
+        self.assertEqual(probe["copyAction"], "29:65507+57:32")
+        self.assertEqual(len(json.loads(after)["connections"]), 2)
 
     def test_a_new_file_is_only_the_users(self):
         old = os.umask(0o022)

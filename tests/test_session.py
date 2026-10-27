@@ -35,6 +35,94 @@ class KeyCapture(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid keyCapture"):
             session.resolve(conn(group="Desk"), data)
 
+class InputProfiles(unittest.TestCase):
+    def test_default_and_explicit_settings(self):
+        for protocol in ("vnc", "rdp", "gliff", "ssh"):
+            value = session.resolve(conn(protocol=protocol), {"groups": {}})
+            self.assertEqual(value["inputProfile"], "default")
+            self.assertEqual(value["inputTrigger1"], "")
+        settings = {"inputProfile": "macos", "inputTrigger1": "58", "inputAction1": "29:65507+57:32"}
+        data = {"groups": {"Desk": {"settings": settings}}}
+        self.assertEqual(session.resolve(conn(group="Desk"), data)["inputAction1"], settings["inputAction1"])
+        self.assertEqual(session.resolve(conn(group="Desk", inputProfile="custom"), data)["inputProfile"], "custom")
+        self.assertEqual(session.portable_connection(conn(**settings))["inputAction1"], settings["inputAction1"])
+        source = {"connections": [conn(**settings)], "groups": {}}
+        for kind in ("export", "sync"):
+            document = json.loads(json.dumps(session.portable(source, "other", kind)))
+            merged, report = session.merge({"connections": [], "groups": {}}, [document])
+            self.assertFalse(report["errors"])
+            saved = merged["connections"][0]
+            self.assertEqual(saved["inputProfile"], "macos")
+            self.assertEqual(saved["inputTrigger1"], "58")
+            self.assertEqual(saved["inputAction1"], "29:65507+57:32")
+
+    def test_invalid_mappings_and_profiles(self):
+        for trigger, action in (("58", ""), ("999", "57:32"), ("58", "29:65507+29:1"), ("58", "1:0")):
+            with self.assertRaises(ValueError):
+                session.resolve(conn(inputTrigger1=trigger, inputAction1=action), {"groups": {}})
+        with self.assertRaises(ValueError):
+            session.resolve(conn(inputProfile="detected"), {"groups": {}})
+        self.assertEqual(session.odd_types(conn(inputAction1="bogus")), "inputAction1")
+        document = session.portable({"connections": [conn(inputTrigger1="58")], "groups": {}}, "other")
+        merged, report = session.merge({"connections": [], "groups": {}}, [document])
+        self.assertEqual(merged["connections"], [])
+        self.assertTrue(report["errors"])
+
+    def test_group_import_rejects_invalid_effective_mappings(self):
+        old = {"settings": {"inputTrigger1": "58", "inputAction1": "57:32"}, "modified": 1}
+        cases = (
+            ({"inputAction1": "57:32"}, {"inputTrigger1": ""}, "invalid input mapping"),
+            ({"inputTrigger2": "59", "inputAction2": "57:32"},
+             {"inputTrigger1": "59", "inputAction1": "57:32"}, "duplicate input mapping"),
+        )
+        for overrides, settings, error in cases:
+            for trashed in (False, True):
+                with self.subTest(overrides=overrides, trashed=trashed):
+                    member = conn(group="Desk", **overrides)
+                    local = {"connections": [] if trashed else [member],
+                             "trash": [{"connection": member}] if trashed else [], "groups": {"Desk": old}}
+                    document = {"format": "omaremote-sync", "version": 1, "system": "other", "groups": {"Desk": {"settings": settings, "modified": 2}}}
+                    merged, report = session.merge(local, [document], now=1000)
+                    self.assertEqual(merged["groups"]["Desk"], old)
+                    self.assertTrue(any("skipped group 'Desk'" in e and error in e for e in report["errors"]))
+                    session.resolve(member, merged)
+                    with tempfile.TemporaryDirectory() as d:
+                        path = os.path.join(d, "connections.json")
+                        with open(path, "w") as f:
+                            json.dump(merged, f)
+                        session.load_connections(path)
+
+    def test_group_only_invalid_mapping_is_rejected(self):
+        for settings in ({"inputTrigger1": "58"},
+                         {"inputTrigger1": "58", "inputAction1": "57:32",
+                          "inputTrigger2": "58", "inputAction2": "57:32"}):
+            with self.subTest(settings=settings):
+                document = {"format": "omaremote-sync", "version": 1, "system": "other", "groups": {"Desk": {"settings": settings, "modified": 2}}}
+                merged, report = session.merge({"connections": [], "groups": {}}, [document], now=1000)
+                self.assertNotIn("Desk", merged["groups"])
+                self.assertTrue(any("skipped group 'Desk'" in e and "input mapping" in e for e in report["errors"]))
+
+    def test_valid_group_mapping_with_member_overrides_is_accepted(self):
+        member = conn(group="Desk", inputTrigger1="59", inputAction1="57:32")
+        local = {"connections": [member], "groups": {}}
+        settings = {"inputTrigger1": "58", "inputAction1": "57:32"}
+        document = {"format": "omaremote-sync", "version": 1, "system": "other", "groups": {"Desk": {"settings": settings, "modified": 2}}}
+        merged, report = session.merge(local, [document], now=1000)
+        self.assertFalse(report["errors"])
+        self.assertEqual(merged["groups"]["Desk"]["settings"], settings)
+        self.assertEqual(session.resolve(member, merged)["inputTrigger1"], "59")
+
+    def test_group_deletion_rejects_invalid_effective_mapping(self):
+        member = conn(group="Desk", inputAction1="57:32")
+        group = {"settings": {"inputTrigger1": "58", "inputAction1": "57:32"}, "modified": 1}
+        local = {"connections": [member], "groups": {"Desk": group}}
+        document = {"format": "omaremote-sync", "version": 1, "system": "other", "deletedGroups": {"Desk": 2}}
+        merged, report = session.merge(local, [document], now=1000)
+        self.assertEqual(merged["groups"]["Desk"], group)
+        self.assertNotIn("Desk", merged["deletedGroups"])
+        self.assertTrue(any("skipped group 'Desk' deletion" in e for e in report["errors"]))
+        session.resolve(member, merged)
+
 
 class BuildArgs(unittest.TestCase):
     def test_minimal_fit_follows_window(self):
@@ -2643,6 +2731,44 @@ class Files(unittest.TestCase):
         out, calls = self.run_browse(fuse=False)
         self.assertEqual(out, {"state": "needs-fuse"})
         self.assertEqual(calls, [])
+
+
+class RdpInputMapping(unittest.TestCase):
+    def test_supported_actions_and_unrestricted_trigger(self):
+        extras = (89, 92, 93, 94, 96, 97, 98, 99, 100, 102, 103, 104, 105, 106, 107,
+                  108, 109, 110, 111, 113, 114, 115, 117, 119, 121, 122, 123, 124, 127)
+        for code in (*range(1, 89), *extras):
+            with self.subTest(code=code):
+                result = session.resolve(conn(inputProfile="custom", inputTrigger1="767", inputAction1=f"{code}:1"), {"groups": {}})
+                self.assertEqual(result["inputAction1"], f"{code}:1")
+
+    def test_unsupported_and_super_actions_rejected_for_rdp_only(self):
+        for code in (90, 91, 95, 101, 112, 116, 118, 120, 125, 126, 128, 767):
+            with self.subTest(code=code):
+                fields = dict(inputProfile="custom", inputTrigger1="58", inputAction1=f"29:65507+{code}:1")
+                message = "Super" if code in (125, 126) else "no RDP scancode"
+                with self.assertRaisesRegex(ValueError, message):
+                    session.resolve(conn(**fields), {"groups": {}})
+                self.assertEqual(session.resolve(conn(protocol="vnc", **fields), {"groups": {}})["inputAction1"], fields["inputAction1"])
+                self.assertEqual(session.resolve(conn(**dict(fields, inputProfile="default")), {"groups": {}})["inputAction1"], fields["inputAction1"])
+                self.assertEqual(session.resolve(conn(protocol="ssh", **fields), {"groups": {}})["inputAction1"], fields["inputAction1"])
+
+    def test_inherited_and_imported_rdp_actions_rejected(self):
+        settings = {"inputProfile": "custom", "inputTrigger2": "58", "inputAction2": "90:1"}
+        data = {"groups": {"Desk": {"settings": settings}}}
+        with self.assertRaisesRegex(ValueError, "mapping 2.*90"):
+            session.resolve(conn(group="Desk"), data)
+        document = session.portable({"connections": [conn(**settings)], "groups": {}}, "other")
+        merged, report = session.merge({"connections": [], "groups": {}}, [document])
+        self.assertEqual(merged["connections"], [])
+        self.assertTrue(any("90" in error for error in report["errors"]))
+
+    def test_import_group_change_checks_existing_rdp_members(self):
+        existing = {"connections": [conn(group="Desk", inputProfile="custom")], "groups": {"Desk": {"settings": {}, "modified": 1}}}
+        incoming = {"format": "omaremote-sync", "version": 1, "system": "other", "connections": [], "groups": {"Desk": {"settings": {"inputTrigger1": "58", "inputAction1": "90:1"}, "modified": 2}}}
+        merged, report = session.merge(existing, [incoming])
+        self.assertEqual(merged["groups"]["Desk"]["settings"], {})
+        self.assertTrue(any("90" in error for error in report["errors"]))
 
 
 class UnlockOnReturn(unittest.TestCase):

@@ -345,6 +345,22 @@ the compositor, and `ctrl+alt+g` toggles capture: release while captured, take i
 existing extra-release preference applies to captured desktop sessions too. For
 RDP, capture determines whether the separate **Super key** setting can send Super to the remote.
 
+**Input profile and mappings** (RDP, VNC, Gliff): choose Default, Windows, Linux, macOS or Custom
+yourself; the protocol never selects an OS. Default leaves input unchanged. Other profiles do not
+enable a mapping by themselves. Up to two optional mappings can each name a local **evdev** key
+number and an ordered remote action, expressed as decimal `evdev:keysym` pairs joined with `+`.
+Both fields must be filled to enable a mapping; clear both to disable it. For example, `29:65507+57:32`
+describes Ctrl+Space; it is only a suggestion, not a verified macOS shortcut or automatic fallback.
+On the Mac, enable and check the desired shortcut under System Settings → Keyboard → Keyboard
+Shortcuts → Input Sources. Verify the actual locally delivered source key first: CapsLock is not
+assumed, and a local IME or compositor may consume it. RDP/Gliff use the evdev values; VNC uses the
+keysyms and requires compatible server keymaps. `65329` and `65332` are the X Hangul and Hanja
+keysyms. Already-held modifiers stay held; generated keys are paired. SSH remains unchanged.
+RDP mappings reject unsupported scancodes and Super actions: Super delivery is gated by capture
+and the separate Super key setting. Use supported actions rather than an unreported substitution.
+Profiles and mappings travel with connections through duplication, export/import and sync. No
+remote input-source switch, IME behavior or touchpad fix is claimed without a live test.
+
 ## RDP
 
 ### Scaling

@@ -68,12 +68,22 @@ scaffolding and created crash reports were removed; the running app was untouche
 
 ## M2 — Explicit profiles and IME-safe delivery
 
-- [ ] Add `inputProfile` with unchanged/default behavior and explicit Windows/Linux/macOS/custom selection; never infer the target OS from RDP/VNC/SSH/Gliff.
-- [ ] Add generic editable source-trigger/remote-action mappings for Hangul/Hanja and custom combinations through existing settings/shortcut conventions. Choose the source only after verifying the effective active binding and actual raw events/IME consumption; CapsLock is an unconfirmed candidate, not a selected solution, and a dedicated Hangul/Right Alt event is not required. Preserve settings through edit, duplicate, import/export, and sync, with validation matching existing conventions.
-- [ ] Verify RDP Korean scancodes and VNC `0xff31`/`0xff34` delivery. Keep Gliff evdev/keymap semantics separate; explain server/layout prerequisites.
-- [ ] Make macOS input-source combinations explicitly configurable. No automatic Caps Lock/Control+Space fallback. Pair generated keys and preserve modifiers already held by the user.
+- [x] Add `inputProfile` with unchanged/default behavior and explicit Windows/Linux/macOS/custom selection; never infer the target OS from RDP/VNC/SSH/Gliff.
+- [ ] Verify the effective active binding and actual raw events/IME consumption before choosing a source; CapsLock remains unconfirmed. Two editable source-evdev → ordered remote evdev/keysym mappings are implemented, disabled unless both fields are entered; settings are portable.
+- [ ] Verify RDP Korean scancodes and VNC `0xff31`/`0xff34` delivery. Local fake RFB test now observes the exact VNC keysyms on press and release; actual remote keymap and RDP delivery remain unverified. Keep Gliff evdev/keymap semantics separate.
+- [x] Make macOS input-source combinations explicitly configurable. No automatic Caps Lock/Control+Space fallback. Pair generated keys and preserve modifiers already held by the user.
 - [ ] Determine the correct item-scoped desktop canvas IME behavior without setting global `QT_IM_MODULE=none`. Retain local IME for manager fields and SSH composition/committed text; prevent duplicate committed-text/raw-key delivery.
-- [ ] Add regression coverage for default/missing settings, explicit/custom actions, cleanup, protocol routing, SSH committed text, and settings round trips; update user-facing documentation for the implemented controls.
+- [ ] Add regression coverage for default/missing settings, explicit/custom actions, cleanup, protocol routing, SSH committed text, and settings round trips; update user-facing documentation for the implemented controls. Socket and fake-SSH PTY tests cover text-bearing key events, but actual Qt input-method commit/preedit and duplication remain untested.
+
+Profile/mapping local socket and settings tests do not establish remote delivery, actual IME switching,
+or the user's effective local trigger. The item currently has no `ItemAcceptsInputMethod` or
+`inputMethodEvent` implementation; no process-wide IME changes were made. SSH text-only and keyed
+text commands have been exercised through the local fake SSH PTY, not actual fcitx composition.
+Item-scoped IME and live composition acceptance remain open.
+- `ninja -C native/build` and `QT_QPA_PLATFORM=offscreen native/build/rdpview-keys-test`: passed.
+- `python3 -m unittest discover tests`: 411 passed; ResourceWarning and fork DeprecationWarning reported.
+- Isolated offscreen manager startup loaded configuration; timeout stopped it after eight seconds. No
+  live user seat, session restart, or remote connection was used.
 
 ### M2 live acceptance
 
@@ -106,4 +116,4 @@ ninja -C native/build
 python3 -m unittest discover tests
 ```
 
-Automated checks supplement, not replace, the live acceptance above. M1 local verification is recorded under "M1 implementation and local verification"; unexercised compositor/remote criteria remain unchecked. M2/M3 have not been implemented. Do not mark live criteria passed without a real target session.
+Automated checks supplement, not replace, the live acceptance above. M1 local verification is recorded under "M1 implementation and local verification"; unexercised compositor/remote criteria remain unchecked. M2 profile/mapping controls and M3 changes are implemented; remaining M2/M3 diagnosis and live criteria remain open. Do not mark live criteria passed without a real target session.

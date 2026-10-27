@@ -126,6 +126,36 @@ Rectangle {
         next[key] = value
         d = next
     }
+    function validInputMapping(trigger, action) {
+        if (!trigger && !action) return true
+        if (!/^[1-9][0-9]{0,2}$/.test(trigger) || Number(trigger) > 767) return false
+        var parts = action.split("+")
+        if (parts.length < 1 || parts.length > 8) return false
+        var seen = {}
+        for (var i = 0; i < parts.length; ++i) {
+            var m = /^\s*([1-9][0-9]{0,2}):([1-9][0-9]{0,9})\s*$/.exec(parts[i])
+            if (!m || Number(m[1]) > 767 || Number(m[2]) > 4294967295 || seen[m[1]]) return false
+            seen[m[1]] = true
+        }
+        return true
+    }
+
+    // Keep in sync with native/rdp/main.cpp's rdp_scancode; Super can be suppressed
+    // when keyboard capture is not granted and is therefore not a reliable action key.
+    function rdpActionProblem(action, index) {
+        var extra = [89, 92, 93, 94, 96, 97, 98, 99, 100, 102, 103, 104, 105, 106, 107,
+                     108, 109, 110, 111, 113, 114, 115, 117, 119, 121, 122, 123, 124, 127]
+        if (!action) return ""
+        var parts = action.split("+")
+        for (var i = 0; i < parts.length; ++i) {
+            var code = Number(parts[i].split(":")[0].trim())
+            if (code === 125 || code === 126)
+                return "RDP mapping " + index + ": Super action code " + code + " may be suppressed without keyboard capture; choose another action."
+            if (!(code >= 1 && code <= 88) && extra.indexOf(code) < 0)
+                return "RDP mapping " + index + ": action evdev code " + code + " has no RDP scancode; choose a supported key."
+        }
+        return ""
+    }
 
     // Hotkey windows are limited (Hotkeys.limit), and refresh what Hyprland binds for the check.
     function pickOpenIn(v) {
@@ -149,6 +179,19 @@ Rectangle {
 
     function save() {
         var c = Object.assign({}, d)
+        if (!validInputMapping(c.inputTrigger1 || "", c.inputAction1 || "") ||
+            !validInputMapping(c.inputTrigger2 || "", c.inputAction2 || "") ||
+            (c.inputTrigger1 && c.inputTrigger1 === c.inputTrigger2)) {
+            error = "Input mapping: enter a unique source evdev code and an action of evdev:keysym pairs."
+            return
+        }
+        if (isRdp && c.inputProfile !== "default" && c.inputProfile) {
+            var problem = rdpActionProblem(c.inputAction1 || "", 1) || rdpActionProblem(c.inputAction2 || "", 2)
+            if (problem) {
+                error = problem
+                return
+            }
+        }
         if (c.openIn === "hotkey" && shortcutProblem !== "") {
             error = "Shortcut: " + shortcutProblem
             return
@@ -661,6 +704,46 @@ Rectangle {
                         options: [{ value: "auto", label: "Auto" }, { value: "on", label: "On" }, { value: "off", label: "Off" }]
                         onPicked: function (v) { root.set("keyCapture", v) }
                     }
+                }
+                FormRow {
+                    inherited: root.fromGroup("inputProfile")
+                    label: "Input profile"
+                    visible: !root.isSsh
+                    help: "Chosen manually, never inferred from protocol. Default leaves input unchanged."
+                    Segment {
+                        value: root.d.inputProfile || "default"
+                        options: [{value: "default", label: "Default"}, {value: "windows", label: "Windows"},
+                                  {value: "linux", label: "Linux"}, {value: "macos", label: "macOS"}, {value: "custom", label: "Custom"}]
+                        onPicked: function (v) { root.set("inputProfile", v) }
+                    }
+                }
+                FormRow {
+                    inherited: root.fromGroup("inputTrigger1")
+                    label: "Mapping 1 source"
+                    visible: !root.isSsh && root.d.inputProfile !== "default"
+                    help: "Optional local evdev code; confirm the actual delivered key first. Empty pair disables mapping."
+                    Input { maximumLength: Limits.shortcut; placeholderText: "evdev code"; text: root.d.inputTrigger1 || ""; onTextEdited: root.set("inputTrigger1", text) }
+                }
+                FormRow {
+                    inherited: root.fromGroup("inputAction1")
+                    label: "Mapping 1 action"
+                    visible: !root.isSsh && root.d.inputProfile !== "default"
+                    help: "Ordered evdev:decimal X keysym pairs separated by +. Example 29:65507+57:32 (Ctrl+Space); on macOS enable the matching Input Sources shortcut. This is unverified guidance, not an automatic fallback."
+                    Input { maximumLength: Limits.shortcut; placeholderText: "29:65507+57:32"; text: root.d.inputAction1 || ""; onTextEdited: root.set("inputAction1", text) }
+                }
+                FormRow {
+                    inherited: root.fromGroup("inputTrigger2")
+                    label: "Mapping 2 source"
+                    visible: !root.isSsh && root.d.inputProfile !== "default"
+                    help: "Optional second distinct source, for example a separate Hanja key."
+                    Input { maximumLength: Limits.shortcut; placeholderText: "evdev code"; text: root.d.inputTrigger2 || ""; onTextEdited: root.set("inputTrigger2", text) }
+                }
+                FormRow {
+                    inherited: root.fromGroup("inputAction2")
+                    label: "Mapping 2 action"
+                    visible: !root.isSsh && root.d.inputProfile !== "default"
+                    help: "Ordered evdev:decimal keysym pairs; remote layout and VNC keymap must support them."
+                    Input { maximumLength: Limits.shortcut; placeholderText: "evdev:keysym"; text: root.d.inputAction2 || ""; onTextEdited: root.set("inputAction2", text) }
                 }
                 FormRow {
                     inherited: root.fromGroup("unlockAfter")

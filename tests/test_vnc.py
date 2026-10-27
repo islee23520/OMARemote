@@ -1,5 +1,6 @@
 import array
 import os
+import queue
 import shutil
 import socket
 import struct
@@ -17,7 +18,7 @@ HELPER = os.path.join(HERE, "..", "native", "build", "omaremote-vnc")
 # up after readTimeout seconds, and an idle session is still not cut.
 
 
-def fake_server(listener, stall, size=(64, 48), pixels=False):
+def fake_server(listener, stall, size=(64, 48), pixels=False, client_data=None):
     """RFB 3.8 without a password; then a partial, empty, or synthetic pixel update."""
     conn, _ = listener.accept()
     with conn:
@@ -45,8 +46,11 @@ def fake_server(listener, stall, size=(64, 48), pixels=False):
         end = time.monotonic() + 30
         while time.monotonic() < end:
             try:
-                if not conn.recv(4096):
+                data = conn.recv(4096)
+                if not data:
                     return
+                if client_data is not None:
+                    client_data.put(data)
             except socket.timeout:
                 pass
             except OSError:
@@ -55,14 +59,14 @@ def fake_server(listener, stall, size=(64, 48), pixels=False):
 
 @unittest.skipUnless(os.path.exists(HELPER), "needs the native build (ninja -C native/build)")
 class VncSession(unittest.TestCase):
-    def start(self, stall, size=(64, 48), pixels=False):
+    def start(self, stall, size=(64, 48), pixels=False, client_data=None):
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d)
         listener = socket.socket()
         listener.bind(("127.0.0.1", 0))
         listener.listen(1)
         self.addCleanup(listener.close)
-        threading.Thread(target=fake_server, args=(listener, stall, size, pixels), daemon=True).start()
+        threading.Thread(target=fake_server, args=(listener, stall, size, pixels, client_data), daemon=True).start()
         port = listener.getsockname()[1]
         p = subprocess.Popen([HELPER], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              env=dict(os.environ, OMAREMOTE_SOCKET=os.path.join(d, "s")), text=True)
@@ -107,6 +111,69 @@ class VncSession(unittest.TestCase):
             offset = (y * 64 + 3) * 4
             expected[offset:offset + 8] = bytes((68, 85, 102, 255)) * 2
         self.assertEqual(actual, expected)
+        p.terminate()
+        self.assertEqual(p.wait(5), 11)
+
+    def test_hangul_and_hanja_key_events_reach_rfb(self):
+        client_data = queue.Queue()
+        p = self.start(stall=False, client_data=client_data)
+        ui = socket.socket(socket.AF_UNIX)
+        self.addCleanup(ui.close)
+        ui.settimeout(5)
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                ui.connect(self.socket_path)
+                break
+            except (FileNotFoundError, ConnectionRefusedError):
+                if time.monotonic() >= deadline:
+                    self.fail("VNC session did not open its UI socket")
+                time.sleep(0.01)
+        received = b""
+        while b"state connected\n" not in received:
+            data = ui.recv(4096)
+            self.assertTrue(data, "session closed before connecting")
+            received += data
+
+        # Releases contain only the evdev code; the backend must retain the press keysym.
+        ui.sendall(b"key 1 122 65329\nkey 0 122\nkey 1 123 65332\nkey 0 123\n")
+        expected = [(1, 0xff31), (0, 0xff31), (1, 0xff34), (0, 0xff34)]
+        events = []
+        pending = b""
+        deadline = time.monotonic() + 5
+        while len(events) < len(expected):
+            remaining = deadline - time.monotonic()
+            self.assertGreater(remaining, 0, "timed out waiting for RFB key events")
+            try:
+                pending += client_data.get(timeout=remaining)
+            except queue.Empty:
+                self.fail("timed out waiting for RFB key events")
+            while pending:
+                kind = pending[0]
+                if kind == 0:  # SetPixelFormat
+                    length = 20
+                elif kind == 2:  # SetEncodings
+                    if len(pending) < 4:
+                        break
+                    length = 4 + 4 * struct.unpack_from(">H", pending, 2)[0]
+                elif kind == 3:  # FramebufferUpdateRequest
+                    length = 10
+                elif kind == 4:  # KeyEvent
+                    length = 8
+                elif kind == 5:  # PointerEvent
+                    length = 6
+                elif kind == 6:  # ClientCutText
+                    if len(pending) < 8:
+                        break
+                    length = 8 + struct.unpack_from(">I", pending, 4)[0]
+                else:
+                    self.fail(f"unexpected RFB client message type {kind}")
+                if len(pending) < length:
+                    break
+                if kind == 4:
+                    events.append((pending[1], struct.unpack_from(">I", pending, 4)[0]))
+                pending = pending[length:]
+        self.assertEqual(events, expected)
         p.terminate()
         self.assertEqual(p.wait(5), 11)
 

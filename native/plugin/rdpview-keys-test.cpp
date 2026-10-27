@@ -192,6 +192,84 @@ int main(int argc, char** argv)
 	QTemporaryDir dir;
 	const QString path = dir.filePath("session.sock");
 	QByteArray lines;
+	// Mapping is opt-in, pairs every synthetic key, and never releases a held modifier.
+	for (const QString& protocol : {QStringLiteral("vnc"), QStringLiteral("rdp"), QStringLiteral("gliff"), QStringLiteral("ssh")})
+	{
+		Session s;
+		expect(s.start(path), "mapping session listens");
+		TestView v;
+		expect(s.acceptFrom(&v, path), "mapping view attaches");
+		v.setSessionProtocol(protocol);
+		v.setProperty("inputTrigger1", "58");
+		v.setProperty("inputAction1", "29:65507+57:32");
+		QKeyEvent down = key(58, Qt::Key_CapsLock, true);
+		QKeyEvent up = key(58, Qt::Key_CapsLock, false);
+		v.keyPressEvent(&down); v.keyReleaseEvent(&up);
+		lines = s.heard();
+		expect(lines.contains("key 1 58 65509\n") && lines.contains("key 0 58\n"), "default passes key unchanged");
+		v.setProperty("inputProfile", "custom");
+		v.keyPressEvent(&down); v.keyReleaseEvent(&up);
+		lines = s.heard();
+		if (protocol == QLatin1String("ssh"))
+			expect(lines.contains("key 1 58 65509\n"), "SSH retains original key");
+		else
+		{
+			expect(lines == "key 1 29 65507\nkey 1 57 32\nkey 0 57\nkey 0 29\n", "configured chord is paired in order");
+			QKeyEvent ctrl = key(97, Qt::Key_Control, true, false, Qt::ControlModifier, 65508);
+			QKeyEvent ctrlUp = key(97, Qt::Key_Control, false);
+			v.keyPressEvent(&ctrl); s.heard();
+			v.keyPressEvent(&down);
+			QKeyEvent repeat = key(58, Qt::Key_CapsLock, true, true);
+			v.keyPressEvent(&repeat);
+			v.releaseAllKeys();
+			v.keyReleaseEvent(&up); v.keyReleaseEvent(&ctrlUp);
+			lines = s.heard();
+			expect(lines == "key 1 57 32\nkey 0 57\nkey 0 97\n", "held right control preserved and cleanup suppresses late releases");
+			QKeyEvent shortcut = key(30, Qt::Key_A, true, false, Qt::ControlModifier, 97);
+			QKeyEvent shortcutUp = key(30, Qt::Key_A, false);
+			v.keyPressEvent(&shortcut); s.heard();
+			v.keyPressEvent(&down); v.keyReleaseEvent(&up);
+			v.keyReleaseEvent(&shortcutUp);
+			lines = s.heard();
+			expect(lines == "key 1 57 32\nkey 0 57\nkey 0 30\nkey 0 29\n", "mapping leaves existing synthetic control held");
+		}
+	}
+	{
+		Session s;
+		expect(s.start(path), "review regression session listens");
+		TestView v;
+		expect(s.acceptFrom(&v, path), "review regression view attaches");
+		v.setSessionProtocol("vnc");
+		v.setProperty("inputProfile", "custom");
+		v.setProperty("inputTrigger1", "58");
+		v.setProperty("inputAction1", "56:65513+57:32");
+		QKeyEvent altgr = key(100, Qt::Key_AltGr, true, false, Qt::NoModifier, 65027);
+		QKeyEvent caps = key(58, Qt::Key_CapsLock, true);
+		QKeyEvent capsUp = key(58, Qt::Key_CapsLock, false);
+		v.keyPressEvent(&altgr); s.heard();
+		v.keyPressEvent(&caps); v.keyReleaseEvent(&capsUp);
+		expect(s.heard() == "key 1 56 65513\nkey 1 57 32\nkey 0 57\nkey 0 56\n", "AltGr does not substitute for left Alt");
+		v.releaseAllKeys(); s.heard();
+		QKeyEvent ctrl = key(29, Qt::Key_Control, true, false, Qt::ControlModifier, 65507);
+		QKeyEvent ctrlUp = key(29, Qt::Key_Control, false);
+		v.setProperty("inputAction1", "100:65507+57:32");
+		v.keyPressEvent(&ctrl); s.heard();
+		v.keyPressEvent(&caps); v.keyReleaseEvent(&capsUp);
+		expect(s.heard() == "key 1 57 32\nkey 0 57\n", "VNC held keysym remains held despite different evdev");
+		v.keyReleaseEvent(&ctrlUp); s.heard();
+		v.setProperty("inputTrigger1", "29");
+		v.setProperty("inputAction1", "122:65329");
+		v.keyPressEvent(&ctrl); s.heard();
+		QKeyEvent a = key(30, Qt::Key_A, true, false, Qt::ControlModifier, 97);
+		QKeyEvent aUp = key(30, Qt::Key_A, false);
+		v.keyPressEvent(&a); v.keyReleaseEvent(&aUp); v.keyReleaseEvent(&ctrlUp);
+		expect(s.heard() == "key 1 30 97\nkey 0 30\n", "mapped Ctrl is not synthesized for subsequent keys");
+		v.setSessionProtocol("rdp");
+		v.setProperty("inputTrigger1", "58");
+		v.setProperty("inputAction1", "29:65507+183:65482");
+		v.keyPressEvent(&caps); v.keyReleaseEvent(&capsUp);
+		expect(s.heard() == "key 1 58 65509\nkey 0 58\n", "unsupported RDP action is never partly emitted");
+	}
 
 	for (const QString& mode : { QStringLiteral("on"), QStringLiteral("auto") })
 	{
@@ -311,6 +389,34 @@ int main(int argc, char** argv)
 		lines = next.heard();
 		expect(lines.count("button 1 1") == 1 && lines.count("button 1 0") == 1,
 		       "fresh mouse input reaches the replacement session");
+	}
+
+	// SSH receives unkeyed text separately, and keyed text only on its key line.
+	{
+		Session s;
+		expect(s.start(path), "the SSH text session listens");
+		TestView v;
+		expect(s.acceptFrom(&v, path), "the SSH text view attaches");
+		v.setSessionProtocol(QStringLiteral("ssh"));
+		s.heard(); // attach/protocol setup may send control lines
+		QKeyEvent unkeyed(QEvent::KeyPress, 0, Qt::NoModifier, 0, 0, 0,
+		                  QString::fromUtf8("\xc3\xa9"));
+		v.keyPressEvent(&unkeyed);
+		expect(s.heard() == "text w6k=\n", "SSH unkeyed UTF-8 text sends exactly one base64 text line");
+		QKeyEvent empty(QEvent::KeyPress, 0, Qt::NoModifier, 0, 0, 0, QString());
+		v.keyPressEvent(&empty);
+		expect(s.heard().isEmpty(), "an unkeyed event without text sends nothing");
+		QKeyEvent ordinary(QEvent::KeyPress, Qt::Key_A, Qt::NoModifier, 38, 97, 0,
+		                   QStringLiteral("a"));
+		v.keyPressEvent(&ordinary);
+		expect(s.heard() == "key 1 30 97 YQ==\n", "SSH ordinary keyed text sends exactly one encoded key line");
+		QKeyEvent ordinaryUp = key(30, Qt::Key_A, false);
+		v.keyReleaseEvent(&ordinaryUp);
+		s.heard();
+		QKeyEvent composed(QEvent::KeyPress, Qt::Key_E, Qt::NoModifier, 26, 101, 0,
+		                   QString::fromUtf8("\xc3\xa9"));
+		v.keyPressEvent(&composed);
+		expect(s.heard() == "key 1 18 101 w6k=\n", "SSH keyed compose text sends exactly one encoded key line");
 	}
 
 	// A key press is sent once, repeats go as presses, the release as a release.

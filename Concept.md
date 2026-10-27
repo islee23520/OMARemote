@@ -2,7 +2,7 @@
 
 This fork (`islee23520/OMARemote`, tracking `RFdeGroot/OMARemote`) addresses three user-reported problems in the running v0.9.15 package: keys reaching the local Wayland session instead of a remote canvas, unreliable remote Hangul/English switching with local fcitx5, and unreliable drag/scroll in VNC.
 
-**M1 implemented; live capture acceptance pending.** Focused capture policy, editor/status integration, actual Wayland activation listeners, runtime RDP Super permission and keyboard cleanup are implemented. Isolated offscreen real-SessionView/socket smoke and native keyboard boundary tests provide local evidence only; no live compositor activation, remote delivery, or CapsLock trigger is confirmed. M2/M3 remain proposed. The running app and user compositor configuration were untouched. See [ToDo.md](ToDo.md) for verification and unavailable prerequisites.
+**M1 and the M2 profile/mapping module are implemented; live acceptance pending.** M3 wheel-residue and pointer-cleanup changes have landed; the reported live touchpad cause remains unconfirmed. No remote IME switch or CapsLock trigger is confirmed. See [ToDo.md](ToDo.md) for remaining work.
 
 ## Evidence and limits
 
@@ -43,7 +43,7 @@ Local configuration inspection found US and Hangul input methods in fcitx5 and `
 
 ## Non-goals
 
-No global exclusive Wayland grab, compositor configuration changes, new remote protocol, guessed remote OS, forced macOS shortcut, or process-wide IME disablement. Capture does not promise to override compositor-reserved escape shortcuts or unsupported compositor policy. M2/M3 are not part of the implemented M1 changes.
+No global exclusive Wayland grab, compositor configuration changes, new remote protocol, guessed remote OS, forced macOS shortcut, or process-wide IME disablement. Capture does not promise to override compositor-reserved escape shortcuts or unsupported compositor policy. Item-scoped IME and live M2/M3 acceptance remain open.
 
 ## Implementation map
 
