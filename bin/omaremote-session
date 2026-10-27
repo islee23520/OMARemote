@@ -142,6 +142,8 @@ DEFAULTS = {
     "homeDrive": False,
     "grabKeyboard": False,
     "keyCapture": "auto",     # auto | on | off
+    "inputProfile": "default",  # manually selected; never derived from the protocol
+    "inputTrigger1": "", "inputAction1": "", "inputTrigger2": "", "inputAction2": "",
     "security": "auto",      # auto | nla | tls | rdp
     "ignoreCert": False,
     "network": "auto",       # auto | lan | broadband | modem
@@ -235,7 +237,7 @@ def migrate_legacy():
 # Settings a group can set for its connections. A connection stores only what differs from what
 # it inherits, so changing the group changes every connection that did not override it.
 SETTING_KEYS = ("display", "fullscreen", "width", "height", "scale", "multimon", "clipboard", "audio", "microphone",
-                "homeDrive", "grabKeyboard", "keyCapture", "security", "ignoreCert", "network", "gateway",
+                "homeDrive", "grabKeyboard", "keyCapture", "inputProfile", "inputTrigger1", "inputAction1", "inputTrigger2", "inputAction2", "security", "ignoreCert", "network", "gateway",
                 "gatewayUser", "gatewayDomain", "kdc", "extraArgs", "openIn",
                 "vncScaling", "vncQuality", "viewOnly", "unlockAfter")
 
@@ -286,6 +288,10 @@ def resolve(conn, data):
     if key_capture not in ("auto", "on", "off"):
         raise ValueError(f"invalid keyCapture setting: {key_capture!r}")
     out["keyCapture"] = key_capture
+    if out["inputProfile"] not in ("default", "windows", "linux", "macos", "custom"):
+        raise ValueError("invalid inputProfile setting")
+    validate_input_mappings(out)
+    validate_rdp_input_mappings(out)
     if not conn.get("port"):
         out["port"] = DEFAULT_PORTS.get(out.get("protocol") or "rdp", 3389)
 
@@ -487,7 +493,8 @@ FIELD_LIMITS = {"name": "name", "group": "name", "host": "host", "gateway": "hos
                 "username": "user", "gatewayUser": "user", "domain": "domain",
                 "gatewayDomain": "domain", "kdc": "hostList", "sshArgs": "args", "extraArgs": "args",
                 "sshKey": "path", "hotkey": "shortcut", "width": "size", "height": "size",
-                "gliffOutput": "standard", "gliffServer": "path"}
+                "gliffOutput": "standard", "gliffServer": "path", "inputProfile": "shortcut",
+                "inputTrigger1": "shortcut", "inputAction1": "shortcut", "inputTrigger2": "shortcut", "inputAction2": "shortcut"}
 
 
 def too_long(fields):
@@ -502,6 +509,64 @@ def too_long(fields):
 
 
 _NUMBER = (int, float)
+
+# Keep in sync with native/rdp/main.cpp's rdp_scancode. Super is excluded even though
+# it has a scancode: the backend may suppress it when keyboard capture is not granted.
+RDP_ACTION_CODES = frozenset(range(1, 89)) | frozenset((
+    89, 92, 93, 94, 96, 97, 98, 99, 100, 102, 103, 104, 105, 106, 107,
+    108, 109, 110, 111, 113, 114, 115, 117, 119, 121, 122, 123, 124, 127,
+))
+
+
+def validate_rdp_input_mappings(mapping):
+    if (mapping.get("protocol") or "rdp") != "rdp" or mapping.get("inputProfile", "default") == "default":
+        return
+    for i in (1, 2):
+        for part in mapping[f"inputAction{i}"].split("+"):
+            if not part:
+                continue
+            code = int(part.strip().split(":", 1)[0])
+            if code not in RDP_ACTION_CODES:
+                if code in (125, 126):
+                    raise ValueError(f"RDP input mapping {i}: Super action code {code} may be suppressed without keyboard capture; choose another action")
+                raise ValueError(f"RDP input mapping {i}: action evdev code {code} has no RDP scancode; choose a supported key")
+
+
+def valid_input_mapping(trigger, action):
+    if not isinstance(trigger, str) or not isinstance(action, str):
+        return False
+    if not trigger and not action:
+        return True
+    if not re.fullmatch(r"[1-9][0-9]{0,2}", trigger) or int(trigger) > 767:
+        return False
+    parts = action.split("+")
+    if not 1 <= len(parts) <= 8:
+        return False
+    codes = []
+    for part in parts:
+        match = re.fullmatch(r"\s*([1-9][0-9]{0,2}):([1-9][0-9]{0,9})\s*", part)
+        if not match or int(match[1]) > 767 or int(match[2]) > 0xffffffff:
+            return False
+        codes.append(int(match[1]))
+    return len(codes) == len(set(codes))
+
+def validate_input_mappings(mapping):
+    for i in (1, 2):
+        if not valid_input_mapping(mapping[f"inputTrigger{i}"], mapping[f"inputAction{i}"]):
+            raise ValueError(f"invalid input mapping {i}")
+    if mapping["inputTrigger1"] and mapping["inputTrigger1"] == mapping["inputTrigger2"]:
+        raise ValueError("duplicate input mapping trigger")
+
+
+
+def valid_input_field(key, value):
+    if key == "inputProfile":
+        return value in ("default", "windows", "linux", "macos", "custom")
+    if key.startswith("inputTrigger"):
+        return value == "" or (bool(re.fullmatch(r"[1-9][0-9]{0,2}", value)) and int(value) <= 767)
+    if key.startswith("inputAction"):
+        return value == "" or valid_input_mapping("1", value)
+    return True
 
 
 def odd_types(fields, connection=True):
@@ -528,6 +593,8 @@ def odd_types(fields, connection=True):
         else:
             ok = isinstance(value, str)
         if not ok:
+            return key
+        if key in ("inputProfile", "inputTrigger1", "inputAction1", "inputTrigger2", "inputAction2") and not valid_input_field(key, value):
             return key
     return None
 
@@ -741,6 +808,15 @@ def merge(local, incoming, now=None, allow_deletions=(), allow_address=()):
             if mine is None and not room({"group": name}, system):
                 continue
             theirs_settings = {k: v for k, v in (g.get("settings") or {}).items() if k not in GROUP_LOCAL_SETTINGS}
+            candidate = dict(DEFAULTS, **theirs_settings)
+            try:
+                validate_input_mappings(candidate)
+                for member in members(name):
+                    validate_input_mappings(dict(candidate, **member))
+                    validate_rdp_input_mappings(dict(candidate, **member))
+            except ValueError as error:
+                report["errors"].append(f"{system}: skipped group {plain(str(name))[:40]!r}: {error}")
+                continue
             # The group's own set signs in through it, and so does every member that signs in here
             # (its gateway takes the member's saved password, or a saved gateway password).
             # A group new here is checked too: a connection here may already name it.
@@ -774,6 +850,12 @@ def merge(local, incoming, now=None, allow_deletions=(), allow_address=()):
                 continue
             mine = groups.get(name)
             if mine is not None and when > mine.get("modified", 0):
+                try:
+                    for member in members(name):
+                        validate_input_mappings(dict(DEFAULTS, **member))
+                except ValueError as error:
+                    report["errors"].append(f"{system}: skipped group {plain(str(name))[:40]!r} deletion: {error}")
+                    continue
                 settings = mine.get("settings") or {}
                 loosens = any(_address({}, settings)) or settings.get("security") in ("nla", "tls")
                 signs_in = mine.get("credential") or any(_signs_in_here(c, groups) for c in members(name))
@@ -803,6 +885,19 @@ def merge(local, incoming, now=None, allow_deletions=(), allow_address=()):
             else:
                 kept.append(ic)
         listed = kept
+        complete = []
+        for ic in listed:
+            try:
+                mapping = dict(DEFAULTS)
+                mapping.update(groups.get(ic.get("group") or "", {}).get("settings") or {})
+                mapping.update(ic)
+                validate_input_mappings(mapping)
+                validate_rdp_input_mappings(mapping)
+            except ValueError as error:
+                report["errors"].append(f"{system}: skipped connection {plain(str(ic.get('name') or ic['host']))[:40]!r}: {error}")
+            else:
+                complete.append(ic)
+        listed = complete
         # Ids and hosts end up in commands and settings: a file that bends them is not taken in.
         odd = [ic for ic in listed if not ID_RE.match(str(ic["id"])) or not HOST_RE.match(ic["host"].strip())
                or any(not ID_RE.match(str(a)) for a in ic.get("aliases") or [])]

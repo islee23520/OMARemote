@@ -110,6 +110,11 @@ Item {
                       ? parseInt(root.connection.scale) : 0
         focus: root.current
         sessionProtocol: root.session ? root.session.protocol : ""
+        inputProfile: root.connection ? (root.connection.inputProfile || "default") : "default"
+        inputTrigger1: root.connection ? (root.connection.inputTrigger1 || "") : ""
+        inputAction1: root.connection ? (root.connection.inputAction1 || "") : ""
+        inputTrigger2: root.connection ? (root.connection.inputTrigger2 || "") : ""
+        inputAction2: root.connection ? (root.connection.inputAction2 || "") : ""
         keyCaptureMode: root.resolvedCaptureMode
         captureShortcuts: !!root.session && root.session.protocol === "gliff"
         // The connection's Clipboard switch; SSH always shares (copying a selection, pasting): its
