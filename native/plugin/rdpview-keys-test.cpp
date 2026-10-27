@@ -1,14 +1,15 @@
-// RdpView's keyboard state machine against a stand-in session socket: what is sent for presses,
-// repeats and releases, and what the cleanups (focus loss, the pointer leaving, the socket dying,
-// the session ending) must and must not do. Prints FAIL lines, exit 1. Needs
-// QT_QPA_PLATFORM=offscreen; the Wayland side (shortcut inhibit) has no part here, so nothing
-// reports capture: these are the keyboard's boundaries, not the compositor's.
+// RdpView's keyboard and mouse state machines against a stand-in session socket: presses,
+// repeats, releases and cleanup on lost focus, grabs, visibility and sessions. Prints FAIL
+// lines, exit 1. Needs QT_QPA_PLATFORM=offscreen; compositor shortcut capture is out of scope.
 #include "rdpview.h"
 
 #include <QHoverEvent>
 #include <QKeyEvent>
 #include <QQuickWindow>
 #include <QTemporaryDir>
+#include <QTemporaryFile>
+#include <QMouseEvent>
+#include <QWheelEvent>
 
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -41,6 +42,11 @@ class TestView : public RdpView
 	using RdpView::hoverLeaveEvent;
 	using RdpView::keyPressEvent;
 	using RdpView::keyReleaseEvent;
+	using RdpView::mousePressEvent;
+	using RdpView::mouseReleaseEvent;
+	using RdpView::mouseMoveEvent;
+	using RdpView::mouseUngrabEvent;
+	using RdpView::wheelEvent;
 };
 
 // One Unix-socket session: what the view sent, and a way to speak as the session process.
@@ -82,6 +88,27 @@ class Session
 		QByteArray data(line);
 		data += '\n';
 		::send(m_client, data.constData(), static_cast<size_t>(data.size()), MSG_NOSIGNAL);
+	}
+	bool frame()
+	{
+		QTemporaryFile file;
+		if (!file.open() || !file.resize(100 * 100 * 4))
+			return false;
+		char line[] = "frame 100 100 400\n";
+		iovec io { line, sizeof(line) - 1 };
+		alignas(cmsghdr) char control[CMSG_SPACE(sizeof(int))] = {};
+		msghdr msg {};
+		msg.msg_iov = &io;
+		msg.msg_iovlen = 1;
+		msg.msg_control = control;
+		msg.msg_controllen = sizeof(control);
+		cmsghdr* c = CMSG_FIRSTHDR(&msg);
+		c->cmsg_level = SOL_SOCKET;
+		c->cmsg_type = SCM_RIGHTS;
+		c->cmsg_len = CMSG_LEN(sizeof(int));
+		const int fd = file.handle();
+		memcpy(CMSG_DATA(c), &fd, sizeof(fd));
+		return sendmsg(m_client, &msg, MSG_NOSIGNAL) == ssize_t(sizeof(line) - 1);
 	}
 	QByteArray heard()
 	{
@@ -137,12 +164,153 @@ static bool focusInView(TestView& v, QQuickWindow& w)
 	return waitUntil([&] { return v.hasActiveFocus() && w.isActive(); });
 }
 
+static void mouse(TestView& v, QEvent::Type type, Qt::MouseButton button,
+                  const QPointF& pos = QPointF(20, 30))
+{
+	QMouseEvent event(type, pos, pos, button,
+	                  type == QEvent::MouseButtonRelease ? Qt::NoButton : button, Qt::NoModifier);
+	if (type == QEvent::MouseButtonPress)
+		v.mousePressEvent(&event);
+	else if (type == QEvent::MouseButtonRelease)
+		v.mouseReleaseEvent(&event);
+	else
+		v.mouseMoveEvent(&event);
+}
+
+static void frame(Session& s, TestView& v)
+{
+	v.setSize(QSizeF(100, 100));
+	expect(s.frame(), "the session sends a real framebuffer fd");
+	expect(waitUntil([&] { return v.remoteSize() == QSize(100, 100); }),
+	       "the view maps the framebuffer");
+}
+
 int main(int argc, char** argv)
 {
 	QGuiApplication app(argc, argv);
 	QTemporaryDir dir;
 	const QString path = dir.filePath("session.sock");
 	QByteArray lines;
+
+	for (const QString& mode : { QStringLiteral("on"), QStringLiteral("auto") })
+	{
+		Session s;
+		expect(s.start(path), "the mouse session listens");
+		QQuickWindow window;
+		TestView v;
+		expect(s.acceptFrom(&v, path), "the mouse view attaches");
+		frame(s, v);
+		v.setKeyCaptureMode(mode);
+		expect(focusInView(v, window), "the mouse view owns a focused window");
+		mouse(v, QEvent::MouseButtonPress, Qt::LeftButton);
+		QWheelEvent wheel(QPointF(40, 50), QPointF(40, 50), QPoint(), QPoint(0, 120),
+		                  Qt::LeftButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+		v.wheelEvent(&wheel);
+		QHoverEvent leave(QEvent::HoverLeave, QPointF(), QPointF(), QPointF(40, 50));
+		v.hoverLeaveEvent(&leave);
+		lines = s.heard();
+		expect(lines.count("button 1 1 20 30\n") == 1, "the drag press reaches the session");
+		expect(lines.count("wheel 120 0 40 50\n") == 1, "wheel is forwarded while held");
+		expect(!lines.contains("button 1 0") && !lines.contains("blur"),
+		       "pointer leave and wheel preserve a held button in on and auto modes");
+		mouse(v, QEvent::MouseButtonRelease, Qt::LeftButton, QPointF(60, 70));
+		expect(s.heard().count("button 1 0 60 70\n") == 1,
+		       "physical release finishes the drag after pointer leave");
+	}
+
+	for (bool ungrab : { false, true })
+	{
+		Session s;
+		expect(s.start(path), "the cleanup session listens");
+		TestView v;
+		expect(s.acceptFrom(&v, path), "the cleanup view attaches");
+		frame(s, v);
+		mouse(v, QEvent::MouseButtonPress, Qt::LeftButton);
+		mouse(v, QEvent::MouseButtonPress, Qt::RightButton);
+		mouse(v, QEvent::MouseMove, Qt::NoButton, QPointF(65, 75));
+		s.heard();
+		QFocusEvent out(QEvent::FocusOut);
+		for (int i = 0; i < 2; ++i)
+		{
+			if (ungrab)
+				v.mouseUngrabEvent();
+			else
+				v.focusOutEvent(&out);
+		}
+		mouse(v, QEvent::MouseButtonRelease, Qt::LeftButton);
+		mouse(v, QEvent::MouseButtonRelease, Qt::RightButton);
+		lines = s.heard();
+		expect(lines.count("button 1 0 65 75\n") == 1 &&
+		           lines.count("button 2 0 65 75\n") == 1 && lines.count("button ") == 2,
+		       "cleanup lifts each button once at the last sent position and suppresses late ups");
+		expect(lines.count("blur\n") == (ungrab ? 0 : 1),
+		       "focus loss blurs once, mouse ungrab never blurs");
+		mouse(v, QEvent::MouseButtonPress, Qt::LeftButton);
+		mouse(v, QEvent::MouseButtonRelease, Qt::LeftButton);
+		lines = s.heard();
+		expect(lines.count("button 1 1 20 30\n") == 1 &&
+		           lines.count("button 1 0 20 30\n") == 1,
+		       "fresh mouse input works after cleanup");
+	}
+
+	// No key was pressed: these lifecycle paths must still lift mouse input.
+	for (int cleanup = 0; cleanup < 3; ++cleanup)
+	{
+		Session s;
+		expect(s.start(path), "the lifecycle session listens");
+		QQuickWindow window;
+		TestView v;
+		expect(s.acceptFrom(&v, path), "the lifecycle view attaches");
+		frame(s, v);
+		expect(focusInView(v, window), "the lifecycle view owns a focused window");
+		mouse(v, QEvent::MouseButtonPress, Qt::MiddleButton);
+		s.heard();
+		if (cleanup == 0)
+			v.setVisible(false);
+		else if (cleanup == 1)
+		{
+			s.say("state ended 0");
+			expect(waitUntil([&] { return v.state() == QLatin1String("ended"); }),
+			       "the mouse-only session ends");
+		}
+		else
+			v.setSocketPath(QString());
+		lines = s.heard();
+		expect(lines.count("button 3 0 20 30\n") == 1 && lines.count("blur\n") == 1,
+		       "hide, session end and explicit detach lift mouse-only input and blur once");
+		mouse(v, QEvent::MouseButtonRelease, Qt::MiddleButton);
+		expect(!s.heard().contains("button "), "lifecycle cleanup suppresses a late release");
+	}
+
+	for (bool died : { false, true })
+	{
+		Session s;
+		expect(s.start(path), "the old mouse session listens");
+		TestView v;
+		expect(s.acceptFrom(&v, path), "the old mouse view attaches");
+		mouse(v, QEvent::MouseButtonPress, Qt::LeftButton);
+		s.heard();
+		if (died)
+		{
+			s.close();
+			expect(waitUntil([&] { return !v.attached(); }), "socket death detaches the mouse view");
+		}
+		const QString replacement = dir.filePath("replacement.sock");
+		Session next;
+		expect(next.start(replacement), "the replacement mouse session listens");
+		expect(next.acceptFrom(&v, replacement), "the mouse view attaches to the replacement");
+		if (!died)
+			expect(s.heard().count("button 1 0") == 1,
+			       "live replacement releases the button to the old session");
+		mouse(v, QEvent::MouseButtonRelease, Qt::LeftButton);
+		v.mouseUngrabEvent();
+		expect(!next.heard().contains("button "), "no stale release reaches a replacement session");
+		mouse(v, QEvent::MouseButtonPress, Qt::LeftButton);
+		mouse(v, QEvent::MouseButtonRelease, Qt::LeftButton);
+		lines = next.heard();
+		expect(lines.count("button 1 1") == 1 && lines.count("button 1 0") == 1,
+		       "fresh mouse input reaches the replacement session");
+	}
 
 	// A key press is sent once, repeats go as presses, the release as a release.
 	{

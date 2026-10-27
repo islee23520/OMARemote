@@ -46,6 +46,11 @@ struct Session
 
 	int buttons = 0;                      // RFB button mask
 	std::map<uint32_t, uint32_t> pressed; // evdev code -> keysym sent at press, released the same
+	// Wheel residue: a touchpad sends many small angle deltas where a notched wheel sends
+	// ±120s; RFB has only whole button clicks, so what is left over waits here for the next
+	// event. Per axis and signed, so a direction change spends its residue before scrolling
+	// the other way.
+	int wheelX = 0, wheelY = 0;
 	std::string remoteClip;
 	std::string localClip;
 	std::string pendingClip; // offered before the connection was up
@@ -308,6 +313,19 @@ static void click(int mask, int x, int y)
 	SendPointerEvent(g.client, x, y, g.buttons);
 }
 
+// One wheel click per full notch in the residue: spends as many 120s as it holds and keeps the
+// signed remainder for the next event.
+static void wheel_clicks(int& residue, int delta, int mask, int x, int y)
+{
+	long total = long(residue) + delta;
+	while (total >= 120 || total <= -120)
+	{
+		click(total > 0 ? mask : mask << 1, x, y);
+		total += total > 0 ? -120 : 120;
+	}
+	residue = int(total);
+}
+
 static void handle_line(const std::string& line)
 {
 	const auto w = split(line);
@@ -342,11 +360,10 @@ static void handle_line(const std::string& line)
 	else if (cmd == "wheel" && input && w.size() >= 5)
 	{
 		const int x = int(num(3)), y = int(num(4));
-		// One button press per notch (120): 4 up, 5 down, 6 left, 7 right.
-		for (long dy = num(1); dy >= 120 || dy <= -120; dy += dy > 0 ? -120 : 120)
-			click(dy > 0 ? 8 : 16, x, y);
-		for (long dx = num(2); dx >= 120 || dx <= -120; dx += dx > 0 ? -120 : 120)
-			click(dx > 0 ? 32 : 64, x, y);
+		// One button press per notch (120): 4 up, 5 down, 6 left, 7 right — RFB bits 8/16
+		// vertical, 32/64 horizontal.
+		wheel_clicks(g.wheelY, int(num(1)), 8, x, y);
+		wheel_clicks(g.wheelX, int(num(2)), 32, x, y);
 	}
 	else if (cmd == "key" && input && w.size() >= 3)
 	{
@@ -527,6 +544,7 @@ int main()
 	}
 	g.client = client;
 	g.connected = true;
+	g.wheelX = g.wheelY = 0;
 	if (!g.pendingClip.empty())
 		send_clipboard(g.pendingClip);
 	// The supervisor reads this line as "connected".
@@ -559,6 +577,8 @@ int main()
 	}
 	if (g.quit)
 		rc = 11;
+	g.connected = false;
+	g.wheelX = g.wheelY = 0;
 	log("session ended");
 	g.link.send("state ended " + std::to_string(rc));
 	rfbClientCleanup(client);

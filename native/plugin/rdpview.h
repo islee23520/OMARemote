@@ -155,6 +155,7 @@ protected:
 	void hoverMoveEvent(QHoverEvent* event) override;
 	void hoverEnterEvent(QHoverEvent* event) override;
 	void hoverLeaveEvent(QHoverEvent* event) override;
+	void mouseUngrabEvent() override;
 	void wheelEvent(QWheelEvent* event) override;
 	void focusInEvent(QFocusEvent* event) override;
 	void focusOutEvent(QFocusEvent* event) override;
@@ -181,6 +182,7 @@ private:
 	void updateCaptureState();
 	void onInhibitActivation(); // the compositor's active/inactive arrived
 	void loseKeyboard(); // keys lifted and the session told it lost the keyboard
+	void releaseHeldButtons(); // buttons lifted at their last remote place, once per press
 	QRectF imageRect() const;
 	QPoint toRemote(const QPointF& p) const;
 	qreal devicePixelRatio() const;
@@ -253,5 +255,9 @@ private:
 	bool m_clipReading = false; // a read is under way; one more follows it when asked meanwhile
 	bool m_clipAgain = false;
 	bool m_clipAgainForce = false;
-	Qt::MouseButtons m_buttons;
+	// Buttons pressed on the remote through this view, and where the pointer was last sent: a
+	// drag may legitimately run past the item's edge, so leaving lifts nothing, but a lost
+	// grab, keyboard, window or session lifts them (a remote button left down drags alone).
+	Qt::MouseButtons m_buttons = Qt::NoButton;
+	QPoint m_lastRemotePos;
 };
