@@ -297,6 +297,31 @@ int main(int argc, char** argv)
 		expect(!v.shortcutsCaptured(), "ineligible is not captured");
 	}
 
+	// The release chord's counterpart. Without a compositor nothing is ever captured, so both
+	// release and rearm are no-ops whatever the state says; the latch itself only a live
+	// compositor can leave (releaseShortcuts runs on "active").
+	{
+		Session s;
+		expect(s.start(path), "the stand-in session listens");
+		TestView v;
+		QQuickWindow window;
+		expect(s.acceptFrom(&v, path), "the view attaches");
+		v.setKeyCaptureMode(QStringLiteral("on"));
+		expect(focusInView(v, window), "the view has the keyboard");
+		expect(v.captureState() == QLatin1String("unsupported"),
+		       "a focused asking view without the protocol says unsupported");
+		v.releaseShortcuts();
+		expect(v.captureState() == QLatin1String("unsupported"),
+		       "release without capture changes nothing");
+		v.rearmShortcuts();
+		expect(v.captureState() == QLatin1String("unsupported"),
+		       "rearm without the release latch changes nothing");
+		QKeyEvent b = key(48, Qt::Key_B, true);
+		v.keyPressEvent(&b);
+		lines = s.heard();
+		expect(lines.count("key 1 48") == 1, "a key still types on the remote");
+	}
+
 	if (failures == 0)
 		printf("ok\n");
 	return failures == 0 ? 0 : 1;

@@ -11,6 +11,11 @@
 - [x] Register the generic session release chord through Keymap/SessionView and retain explicit rearm. Activation-dependent runtime release remains a live acceptance item below.
 - [x] Implement tracked-key/modifier cleanup and stale-repeat suppression without synthesizing mouse releases; exercise real RdpView/socket boundaries in `rdpview-keys-test`.
 - [x] Add behavioral settings/key-cleanup coverage and user documentation. The permanent native regression runs as `QT_QPA_PLATFORM=offscreen native/build/rdpview-keys-test`; full-suite results are recorded under "M1 implementation and local verification" below.
+- [x] Add the capture-toggle session chord (`ctrl+alt+g`, an unused chord; `ctrl+alt+t` is taken
+  by own-window-to-tab): release while captured, take the shortcuts back through the new
+  `rearmShortcuts()` without a click, with a truthful `released` capture state between. The
+  chord follows Settings › Keyboard like every session chord; live activation remains an item
+  below.
 
 ### M1 live acceptance
 
@@ -18,6 +23,10 @@
 - [ ] Verify pointer-inside/outside behavior for auto/on modes without stealing focus. Test manager fields, connection editor, popup, tab/window switch, hide/show, reconnect, and window deactivation.
 - [ ] Hold modifiers/keys through escape, focus loss, and disconnect: no remote stuck keys, duplicate releases, local modifier contamination, or replay into another session. Escape remains usable while captured; recapture requires the intended rearming action.
 - [ ] Verify stored RDP Super forwarding and the capture policy produce the documented effective backend gate, including restoration when capture ends; compositor inhibition alone must not leave Super silently discarded. Record observed results and limitations rather than treating protocol support as live proof.
+- [ ] Press the toggle chord on a captured desktop (RDP/VNC `on`, Gliff auto): the status bar
+  shows ⌨ captured → ⌨ released, compositor shortcuts work again, and the same chord takes the
+  shortcuts back (⌨ captured) without a click; a key typed between the two still reaches the
+  remote. RDP: verify Super delivery follows the toggled state.
 
 ### M1 implementation and local verification
 

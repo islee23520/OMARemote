@@ -1371,8 +1371,8 @@ FocusScope {
                           ["ctrl+alt+pgup/pgdn", "tabs"], ["ctrl+alt+k", "keys"]]
                  : root.currentTab !== "home" ? [["ctrl+alt+home", "connections"], ["ctrl+alt+pgup/pgdn", "tabs"], ["ctrl+alt+w", "close tab"]]
                                                 .concat(root.currentIsSsh ? [["ctrl+shift+c/v", "copy/paste"]]
-                                                        : root.currentIsGliff ? [Format.gliffKeyHint(Sessions.capturedSession === root.currentTab)]
-                                                        : [["ctrl+alt+end", "ctrl+alt+del"]])
+                                                        : root.currentIsGliff ? [Format.gliffKeyHint(Sessions.capturedSession === root.currentTab), ["ctrl+alt+g", "capture"]]
+                                                        : [["ctrl+alt+end", "ctrl+alt+del"], ["ctrl+alt+g", "capture"]])
                                                 .concat([["ctrl+alt+⏎", "fullscreen"], ["ctrl+alt+o", "own window"], ["ctrl+alt+p", root.pinned ? "unpin" : "pin"], ["ctrl+alt+k", "keys"]])
                  : root.logSession ? [["w", "warnings only"], ["j k", "scroll"], ["G", "end"], ["esc", "close"]]
                  : root.busy ? [["tab", "next field"], ["←→", "choose"], ["space", "toggle"], ["ctrl+s", "save"], ["esc", "cancel"], ["f1", "keys"]]

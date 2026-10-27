@@ -270,6 +270,8 @@ Item {
         else if (event.key === Qt.Key_PageUp) root.navigate("previous")
         else if (event.key === Qt.Key_End && live) view.sendCtrlAltDel()
         else if (event.key === Qt.Key_Escape && view.shortcutsCaptured) view.releaseShortcuts()
+        // Desktop capture only: SSH has no shortcut capture, so its G chord goes to the terminal.
+        else if (event.key === Qt.Key_G && !root.isSsh) view.shortcutsCaptured ? view.releaseShortcuts() : view.rearmShortcuts()
         else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && live) root.toggleFullscreen()
         else if (event.key === Qt.Key_K) root.navigate("keys")
         else if (event.key === Qt.Key_N) root.navigate("quick")
