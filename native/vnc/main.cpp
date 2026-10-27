@@ -45,6 +45,7 @@ struct Session
 	bool dirty = false;
 
 	int buttons = 0;                      // RFB button mask
+	int pointerX = 0, pointerY = 0;       // last RFB pointer position
 	std::map<uint32_t, uint32_t> pressed; // evdev code -> keysym sent at press, released the same
 	// Wheel residue: a touchpad sends many small angle deltas where a notched wheel sends
 	// ±120s; RFB has only whole button clicks, so what is left over waits here for the next
@@ -302,20 +303,29 @@ static void flush_resize()
 
 // ---------------------------------------------------------------- input
 
-static void send_pointer(int x, int y)
+static void remember_pointer(long x, long y)
 {
-	SendPointerEvent(g.client, std::max(0, x), std::max(0, y), g.buttons);
+	// RFB coordinates are unsigned 16-bit values and must stay within the current desktop.
+	g.pointerX = int(std::clamp(x, 0L, long(std::clamp(g.client->width - 1, 0, 65535))));
+	g.pointerY = int(std::clamp(y, 0L, long(std::clamp(g.client->height - 1, 0, 65535))));
 }
 
-static void click(int mask, int x, int y)
+static void send_pointer(long x, long y)
 {
-	SendPointerEvent(g.client, x, y, g.buttons | mask);
-	SendPointerEvent(g.client, x, y, g.buttons);
+	remember_pointer(x, y);
+	SendPointerEvent(g.client, g.pointerX, g.pointerY, g.buttons);
+}
+
+static void click(int mask, long x, long y)
+{
+	remember_pointer(x, y);
+	SendPointerEvent(g.client, g.pointerX, g.pointerY, g.buttons | mask);
+	SendPointerEvent(g.client, g.pointerX, g.pointerY, g.buttons);
 }
 
 // One wheel click per full notch in the residue: spends as many 120s as it holds and keeps the
 // signed remainder for the next event.
-static void wheel_clicks(int& residue, int delta, int mask, int x, int y)
+static void wheel_clicks(int& residue, int delta, int mask, long x, long y)
 {
 	long total = long(residue) + delta;
 	while (total >= 120 || total <= -120)
@@ -342,7 +352,7 @@ static void handle_line(const std::string& line)
 		flush_resize();
 	}
 	else if (cmd == "mouse" && input)
-		send_pointer(int(num(1)), int(num(2)));
+		send_pointer(num(1), num(2));
 	else if (cmd == "button" && input && w.size() >= 5)
 	{
 		// UI numbering: 1 left, 2 right, 3 middle, 4 back, 5 forward. RFB bits 0 1 2: left middle right.
@@ -354,16 +364,21 @@ static void handle_line(const std::string& line)
 				g.buttons |= masks[b];
 			else
 				g.buttons &= ~masks[b];
-			send_pointer(int(num(3)), int(num(4)));
+			send_pointer(num(3), num(4));
 		}
 	}
 	else if (cmd == "wheel" && input && w.size() >= 5)
 	{
-		const int x = int(num(3)), y = int(num(4));
+		const long x = num(3), y = num(4);
 		// One button press per notch (120): 4 up, 5 down, 6 left, 7 right — RFB bits 8/16
 		// vertical, 32/64 horizontal.
 		wheel_clicks(g.wheelY, int(num(1)), 8, x, y);
 		wheel_clicks(g.wheelX, int(num(2)), 32, x, y);
+	}
+	else if (cmd == "blur" && input && g.buttons)
+	{
+		g.buttons = 0;
+		send_pointer(g.pointerX, g.pointerY);
 	}
 	else if (cmd == "key" && input && w.size() >= 3)
 	{

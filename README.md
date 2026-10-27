@@ -433,6 +433,8 @@ They sign in with a VNC password, or a user name and password for servers that a
   such as TigerVNC, wayvnc and libvncserver-based ones).
 - **Quality**: *Auto* (Tight with JPEG), *High* (lossless ZRLE), *Low* (strong compression).
 - **View only** watches without sending keyboard or mouse input.
+- Held mouse buttons are released on the remote when the session loses focus, so a drag does not
+  stay stuck; moving the pointer off the picture alone does not end the drag.
 - Clipboard text goes both ways (UTF-8 where the server supports it), and the server's cursor is
   drawn locally. Keys are sent as X keysyms, so the server's own keyboard layout applies.
 
