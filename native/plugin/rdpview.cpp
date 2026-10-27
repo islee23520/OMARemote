@@ -1064,7 +1064,12 @@ void RdpView::keyPressEvent(QKeyEvent* e)
 	m_pressed.insert(evdev);
 	// RDP sends the scancode; VNC needs the keysym, which on Wayland and X11 is the native virtual key;
 	// SSH types the text the layout made of it (dead keys included).
-	QByteArray line = "key 1 " + QByteArray::number(evdev) + ' ' + QByteArray::number(e->nativeVirtualKey());
+	quint32 keysym = e->nativeVirtualKey();
+	// caps:none can leave CapsLock with no keysym (0xffffff or 0). Recover the real key
+	// from its evdev code for VNC; leave untabled keys and valid layout keysyms unchanged.
+	if ((keysym == 0xffffff || keysym == 0) && evdev == 58)
+		keysym = 0xffe5; // XK_Caps_Lock
+	QByteArray line = "key 1 " + QByteArray::number(evdev) + ' ' + QByteArray::number(keysym);
 	if (!e->text().isEmpty())
 		line += ' ' + e->text().toUtf8().toBase64();
 	send(line);
