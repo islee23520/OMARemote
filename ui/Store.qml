@@ -63,13 +63,13 @@ Singleton {
         clipboard: true, audio: "local", microphone: false, homeDrive: false, grabKeyboard: false, keyCapture: "auto",
         security: "auto", ignoreCert: false, network: "auto",
         gateway: "", gatewayUser: "", gatewayDomain: "", gatewaySavePassword: false, kdc: "",
-        extraArgs: "", openIn: "tab", vncScaling: "fit", vncQuality: "auto", viewOnly: false, unlockAfter: 0, notThisComputer: "", sshArgs: "", sshKey: "", sshReconnect: true, gliffScreen: "mirror", gliffOutput: "", gliffColour: "auto", gliffCapture: "auto", gliffVideo: "auto", gliffServer: "", hotkey: "",
+        extraArgs: "", openIn: "tab", vncScaling: "fit", vncWheelScale: 1, vncQuality: "auto", viewOnly: false, unlockAfter: 0, notThisComputer: "", sshArgs: "", sshKey: "", sshReconnect: true, gliffScreen: "mirror", gliffOutput: "", gliffColour: "auto", gliffCapture: "auto", gliffVideo: "auto", gliffServer: "", hotkey: "",
         favourite: false, lastConnected: 0
     })
     // Settings a group can set (SETTING_KEYS in bin/omaremote-session).
     readonly property var settingKeys: ["display", "fullscreen", "width", "height", "scale", "multimon", "clipboard", "audio",
         "microphone", "homeDrive", "grabKeyboard", "keyCapture", "security", "ignoreCert", "network", "gateway",
-        "gatewayUser", "gatewayDomain", "kdc", "extraArgs", "openIn", "vncScaling", "vncQuality", "viewOnly",
+        "gatewayUser", "gatewayDomain", "kdc", "extraArgs", "openIn", "vncScaling", "vncWheelScale", "vncQuality", "viewOnly",
         "unlockAfter"]
     readonly property var resolvedOnly: ["credentialSource", "secretKind", "secretId"]
     // Never exported or synced: LOCAL_KEYS in bin/omaremote-session holds the list, keep in step.
