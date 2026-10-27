@@ -410,7 +410,9 @@ FocusScope {
                             visible: root.section === "keyboard"
                             text: "Focused RDP, VNC and Gliff desktops can capture keys, including compositor shortcuts. "
                                 + "Capture requires Wayland shortcut-inhibit support. " + Keymap.cap("ctrl+alt+escape")
-                                + " releases capture; Session keys changes that chord. For RDP it determines whether Super key delivery is effective."
+                                + " releases capture, and " + Keymap.cap("ctrl+alt+g") + " toggles it: release while captured, "
+                                + "take it back after. Session keys changes those chords. For RDP it determines whether "
+                                + "Super key delivery is effective."
                         }
                         FormRow {
                             visible: root.section === "keyboard"

@@ -254,6 +254,7 @@ FocusScope {
                     root.session && root.session.protocol === "ssh" ? ["ctrl+shift+c/v", "copy/paste"]
                     : root.session && root.session.protocol === "gliff" ? Format.gliffKeyHint(Sessions.capturedSession === root.session.id)
                     : ["ctrl+alt+end", "ctrl+alt+del"],
+                    ["ctrl+alt+g", "capture"],
                     ["ctrl+alt+home", "to connections"], [Sessions.closeKey, "disconnect"]])
         }
     }
