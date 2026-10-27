@@ -642,10 +642,20 @@ class Vnc(unittest.TestCase):
     def test_config_lines(self):
         lines = session.build_vnc_config(conn(protocol="vnc", host="nas.lan", username="me", viewOnly=True,
                                               vncScaling="resize", vncQuality="low"), password="pw")
-        self.assertEqual(lines[:5], ["host=nas.lan", "port=5900", "scaling=resize", "quality=low", "viewOnly=1"])
+        self.assertEqual(lines[:6], ["host=nas.lan", "port=5900", "scaling=resize", "quality=low", "wheelScale=1.0", "viewOnly=1"])
         self.assertIn("username=me", lines)
         self.assertIn("password=pw", lines)
         self.assertIn("password=********", session.redact(lines))
+
+    def test_wheel_sensitivity_is_bounded_and_reaches_vnc_config(self):
+        lines = session.build_vnc_config(conn(protocol="vnc"))
+        self.assertIn("wheelScale=1.0", lines)
+        self.assertIn("wheelScale=1.001", session.build_vnc_config(conn(protocol="vnc", vncWheelScale=1.001)))
+        self.assertIn("wheelScale=1.003", session.build_vnc_config(conn(protocol="vnc", vncWheelScale=1.003)))
+        for value in (0.25, 8, 1.25, 1.001, 1.003):
+            self.assertIsNone(session.odd_types(conn(vncWheelScale=value)))
+        for value in (0.249, 8.001, 1.2345, True, "2", float("inf"), float("nan")):
+            self.assertEqual(session.odd_types(conn(vncWheelScale=value)), "vncWheelScale")
 
     def test_clipboard_switch_reaches_the_session(self):
         self.assertIn("clipboard=1", session.build_vnc_config(conn(protocol="vnc")))

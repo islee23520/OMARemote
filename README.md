@@ -248,6 +248,8 @@ saves nothing but the address: quick connections stay on this system (not synced
 show under *Recent* and *Active*, and `s` saves one as an ordinary connection (`del` forgets it).
 The newest ten are kept.
 
+**VNC wheel sensitivity.** Each VNC connection or group can scale received angle deltas from `0.25×` to `8×` in `0.001×` steps; default `1×` preserves the existing behavior. Configure *Wheel sensitivity* in the connection or group editor. Both axes and signed fractional residue are retained. No macOS detection or pixel-scroll conversion is performed. This change is based on the M3 VNC button-mask release and does not establish that a Mac VNC session's scrolling is fixed.
+
 From a keybinding or script: `omaremote open "Work PC"` shows that connection in OMARemote (its
 running session, or a new one in a tab, starting OMARemote if needed); `omaremote connect "Work PC"`
 connects without the window; `omaremote toggle "Work PC"` shows or hides a hotkey window. All
