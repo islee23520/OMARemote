@@ -85,7 +85,9 @@ class CaptureToggle(unittest.TestCase):
         mode_end = source.index("\n    readonly property string captureState:", mode_start)
         mode = source[mode_start:mode_end]
         eligible = re.search(r'    readonly property bool canToggleCapture:.*', source).group(0)
+        format_url = "file://" + os.path.abspath(os.path.join(UI, "js", "Format.js"))
         qml = '''import QtQuick
+import "%s" as Format
 Item {
     id: root
     property bool hostHeld: false
@@ -94,13 +96,17 @@ Item {
     property var connection: ({ keyCapture: "auto" })
 %s
 %s
-    property var keymap: ({ isSessionChord: function(e, held) { return true }, sessionKeys: "ctrlalt" })
+    property var keymap: ({ sessionKeys: "ctrlalt", isSessionChord: function(e, held) {
+        return Format.isSessionChord(this.sessionKeys, !!(e.modifiers & Qt.ControlModifier),
+                                     !!(e.modifiers & Qt.AltModifier),
+                                     !!(e.modifiers & Qt.ShiftModifier), held)
+    } })
     property var view: ({ shortcutsCaptured: false, releaseShortcuts: function() { calls.push("release") },
                           rearmShortcuts: function() { calls.push("rearm") } })
     property var calls: []
 %s
     Component.onCompleted: {
-        var event = { key: Qt.Key_G }
+        var event = { key: Qt.Key_G, modifiers: Qt.ControlModifier | Qt.AltModifier }
         var ssh = chord(event)
         session = { protocol: "rdp" }
         connection = { keyCapture: "off" }
@@ -109,10 +115,30 @@ Item {
         var rearm = chord(event)
         view.shortcutsCaptured = true
         var release = chord(event)
-        console.log("RESULT " + JSON.stringify({ ssh: ssh, off: off, rearm: rearm, release: release, calls: calls }))
+        var incomplete = chord({ key: Qt.Key_G, modifiers: Qt.ControlModifier })
+        keymap.sessionKeys = "rctrl"
+        session = { protocol: "ssh" }
+        hostHeld = true
+        var sshRightHeld = chord(event)
+        hostHeld = false
+        var sshRightNotHeld = chord(event)
+        session = { protocol: "rdp" }
+        connection = { keyCapture: "off" }
+        hostHeld = true
+        var offRightHeld = chord(event)
+        hostHeld = false
+        var offRightNotHeld = chord(event)
+        connection = { keyCapture: "auto" }
+        var desktopRightNotHeld = chord(event)
+        hostHeld = true
+        var desktopRightHeld = chord(event)
+        console.log("RESULT " + JSON.stringify({ ssh: ssh, off: off, rearm: rearm, release: release,
+            incomplete: incomplete, sshRightHeld: sshRightHeld, sshRightNotHeld: sshRightNotHeld,
+            offRightHeld: offRightHeld, offRightNotHeld: offRightNotHeld,
+            desktopRightNotHeld: desktopRightNotHeld, desktopRightHeld: desktopRightHeld, calls: calls }))
         Qt.exit(0)
     }
-}''' % (mode, eligible, chord)
+}''' % (format_url, mode, eligible, chord)
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "capture.qml")
             with open(path, "w", encoding="utf-8") as f:
@@ -121,8 +147,12 @@ Item {
             p = subprocess.run([QML, path], env=env, capture_output=True, text=True, timeout=30)
         found = re.search(r"RESULT (\{.*\})", p.stderr + p.stdout)
         self.assertIsNotNone(found, p.stderr)
-        self.assertEqual(json.loads(found.group(1)), {"ssh": False, "off": False, "rearm": True,
-                                                     "release": True, "calls": ["rearm", "release"]})
+        self.assertEqual(json.loads(found.group(1)), {
+            "ssh": False, "off": False, "rearm": True, "release": True, "incomplete": False,
+            "sshRightHeld": True, "sshRightNotHeld": False, "offRightHeld": True,
+            "offRightNotHeld": False, "desktopRightNotHeld": False, "desktopRightHeld": True,
+            "calls": ["rearm", "release", "release"],
+        })
 
     def test_the_native_side_answers_both_ways(self):
         with open(os.path.join(HERE, "..", "native", "plugin", "rdpview.h"), encoding="utf-8") as f:
