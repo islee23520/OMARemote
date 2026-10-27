@@ -1,6 +1,6 @@
 # Design — Remote input ownership and protocol-specific delivery
 
-**Status: M1 implemented, with local offscreen verification and live activation acceptance pending.** M2 input profiles/IME delivery and M3 mouse changes below remain proposed. No live remote reproduction or CapsLock trigger verification has been performed. See [ToDo.md](ToDo.md) for exercised checks and exact limitations.
+**Status: M1 and M2 profile/mapping controls implemented on the M1-based port; M3 mouse changes are not included.** Item-scoped IME behavior and live acceptance remain open. See [ToDo.md](ToDo.md).
 
 ## Settings and compatibility
 
@@ -12,7 +12,7 @@ Add connection settings through the existing Python connection validation/storag
 | `inputProfile` | `default` (missing-field default), `windows`, `linux`, `macos`, or `custom`; explicitly selected, never inferred from protocol. |
 | IME trigger/action mapping | Separate a verified source trigger (CapsLock is only an unconfirmed candidate) from remote Hangul/Hanja actions: existing/native behavior, supported named toggle key, or an explicit ordered key combination. Presets populate editable values; do not require the source to emit a dedicated Hangul key or make the mapping CapsLock-specific. |
 
-The exact serialized action representation should follow existing shortcut/settings conventions after inspection rather than introducing an unrelated shortcut parser. Reject unsupported actions with an explanation rather than silently falling back to another shortcut. Existing connections preserve their present key delivery and IME behavior until explicitly configured. Existing RDP `grabKeyboard` remains a separate Super-forwarding setting, not an alias for `keyCapture`.
+Mappings are two optional source evdev codes and ordered evdev:keysym pairs; default profile leaves all input unchanged. Validation rejects malformed settings. Existing RDP `grabKeyboard` remains separate from capture. Item-scoped IME behavior remains open.
 
 ## Editor, status, and Keymap
 

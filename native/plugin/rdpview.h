@@ -64,6 +64,12 @@ class RdpView : public QQuickItem
 	// through to Windows until "capture 0"; the connection's stored +grab-keyboard setting
 	// stays the baseline underneath and is never changed at runtime.
 	Q_PROPERTY(QString sessionProtocol READ sessionProtocol WRITE setSessionProtocol NOTIFY sessionProtocolChanged)
+	// User-entered mappings: source evdev code and ordered evdev:keysym remote chord.
+	Q_PROPERTY(QString inputProfile MEMBER m_inputProfile)
+	Q_PROPERTY(QString inputTrigger1 MEMBER m_inputTrigger1)
+	Q_PROPERTY(QString inputAction1 MEMBER m_inputAction1)
+	Q_PROPERTY(QString inputTrigger2 MEMBER m_inputTrigger2)
+	Q_PROPERTY(QString inputAction2 MEMBER m_inputAction2)
 	// Off means neither reading the desktop clipboard nor setting text received from the session.
 	Q_PROPERTY(bool shareClipboard READ shareClipboard WRITE setShareClipboard NOTIFY shareClipboardChanged)
 
@@ -229,7 +235,11 @@ private:
 	QString m_releaseKey = QStringLiteral("shift+escape");
 	qint64 m_lastEscape = 0; // for double-escape
 	ShortcutInhibit m_inhibit;
+	QString m_inputProfile = QStringLiteral("default");
+	QString m_inputTrigger1, m_inputAction1, m_inputTrigger2, m_inputAction2;
+	QSet<quint32> m_mappedPressed;
 	QSet<quint32> m_pressed;
+	QHash<quint32, quint32> m_pressedKeysyms;
 	// Keys lifted without their releases having arrived (the keyboard left while they were
 	// held): their repeats are not new presses, and a late release doubles nothing.
 	QSet<quint32> m_stalePressed;

@@ -941,6 +941,20 @@ bool isModifierKey(quint32 evdev)
 			return false;
 	}
 }
+
+bool rdpMappingKeySupported(quint32 key)
+{
+	if (key > 0 && key < 89)
+		return true;
+	switch (key)
+	{
+		case 89: case 92: case 93: case 94: case 96: case 97: case 98: case 99: case 100:
+		case 102: case 103: case 104: case 105: case 106: case 107: case 108: case 109:
+		case 110: case 111: case 113: case 114: case 115: case 117: case 119: case 121:
+		case 122: case 123: case 124: case 127: return true;
+		default: return false;
+	}
+}
 }
 
 void RdpView::keyPressEvent(QKeyEvent* e)
@@ -992,6 +1006,74 @@ void RdpView::keyPressEvent(QKeyEvent* e)
 			return;
 		}
 	}
+	// Explicit desktop mappings only. An action is an ordered list of evdev:keysym pairs;
+	// keys already held by the user are not ours to press or release.
+	if (m_mappedPressed.contains(evdev))
+	{
+		e->accept();
+		return;
+	}
+	if ((m_sessionProtocol == QLatin1String("vnc") || m_sessionProtocol == QLatin1String("rdp") ||
+	     m_sessionProtocol == QLatin1String("gliff")) &&
+	    (m_inputProfile == QLatin1String("windows") || m_inputProfile == QLatin1String("linux") ||
+	     m_inputProfile == QLatin1String("macos") || m_inputProfile == QLatin1String("custom")))
+	{
+		const QString triggers[] = {m_inputTrigger1, m_inputTrigger2};
+		const QString actions[] = {m_inputAction1, m_inputAction2};
+		for (int i = 0; i < 2; ++i)
+		{
+			bool ok = false;
+			const quint32 trigger = triggers[i].toUInt(&ok);
+			if (!ok || !trigger || trigger != evdev || e->isAutoRepeat() || m_pressed.contains(evdev))
+				continue;
+			QList<QPair<quint32, quint32>> action;
+			QSet<quint32> seen;
+			const auto parts = actions[i].split(QLatin1Char('+'));
+			if (parts.isEmpty() || parts.size() > 8)
+				break;
+			for (const QString& part : parts)
+			{
+				const auto pair = part.trimmed().split(QLatin1Char(':'));
+				bool keyOk = false, symOk = false;
+				const quint32 key = pair.value(0).toUInt(&keyOk);
+				const quint32 sym = pair.value(1).toUInt(&symOk);
+				if (pair.size() != 2 || !keyOk || !symOk || !key || key > 767 || !sym || seen.contains(key) ||
+				    (m_sessionProtocol == QLatin1String("rdp") && !rdpMappingKeySupported(key)))
+				{
+					action.clear();
+					break;
+				}
+				seen.insert(key);
+				action.append({key, sym});
+			}
+			if (action.isEmpty())
+				break;
+			m_mappedPressed.insert(evdev);
+			QList<quint32> owned;
+			for (const auto& item : action)
+			{
+				const quint32 key = item.first;
+				const quint32 other = key == 29 ? 97 : key == 97 ? 29 : key == 42 ? 54 : key == 54 ? 42 :
+				                      key == 125 ? 126 : key == 126 ? 125 : 0;
+				bool held = m_pressed.contains(key) || (other && m_pressed.contains(other));
+				if (m_sessionProtocol == QLatin1String("vnc"))
+					for (auto it = m_pressedKeysyms.cbegin(); it != m_pressedKeysyms.cend(); ++it)
+						held = held || it.value() == item.second;
+				for (const Chord& chord : m_chords)
+					for (const auto& added : chord.added)
+						held = held || added.first == key || (other && added.first == other) ||
+						       (m_sessionProtocol == QLatin1String("vnc") && added.second == item.second);
+				if (held)
+					continue;
+				send("key 1 " + QByteArray::number(item.first) + ' ' + QByteArray::number(item.second));
+				owned.append(item.first);
+			}
+			for (auto it = owned.crbegin(); it != owned.crend(); ++it)
+				send("key 0 " + QByteArray::number(*it));
+			e->accept();
+			return;
+		}
+	}
 	// Hyprland's sendshortcut (Omarchy's Super+V: Shift+Insert in a terminal, Ctrl+V elsewhere) sets
 	// the modifier state without pressing the modifier keys, and Super stays physically held. The
 	// session sees keys, not states: press the missing modifiers around this key, and lift a held
@@ -1006,7 +1088,8 @@ void RdpView::keyPressEvent(QKeyEvent* e)
 		{
 			const bool held = m_pressed.contains(m.left) || m_pressed.contains(m.right);
 			if ((mods & m.mod) && !held && m.add &&
-			    !m_stalePressed.contains(m.left) && !m_stalePressed.contains(m.right))
+			    !m_stalePressed.contains(m.left) && !m_stalePressed.contains(m.right) &&
+			    !m_mappedPressed.contains(m.left) && !m_mappedPressed.contains(m.right))
 			{
 				send("key 1 " + QByteArray::number(m.left) + ' ' + QByteArray::number(m.keysym));
 				chord.added.append({m.left, m.keysym});
@@ -1029,7 +1112,9 @@ void RdpView::keyPressEvent(QKeyEvent* e)
 	m_pressed.insert(evdev);
 	// RDP sends the scancode; VNC needs the keysym, which on Wayland and X11 is the native virtual key;
 	// SSH types the text the layout made of it (dead keys included).
-	QByteArray line = "key 1 " + QByteArray::number(evdev) + ' ' + QByteArray::number(e->nativeVirtualKey());
+	const quint32 keysym = e->nativeVirtualKey();
+	m_pressedKeysyms.insert(evdev, keysym);
+	QByteArray line = "key 1 " + QByteArray::number(evdev) + ' ' + QByteArray::number(keysym);
 	if (!e->text().isEmpty())
 		line += ' ' + e->text().toUtf8().toBase64();
 	send(line);
@@ -1055,6 +1140,12 @@ void RdpView::keyReleaseEvent(QKeyEvent* e)
 		e->accept();
 		return;
 	}
+	if (m_mappedPressed.remove(evdev))
+	{
+		e->accept();
+		return;
+	}
+	m_pressedKeysyms.remove(evdev);
 	if (m_pressed.remove(evdev))
 		send("key 0 " + QByteArray::number(evdev));
 	// Undo what was done around it: the added modifiers go up.
@@ -1075,8 +1166,10 @@ void RdpView::releaseAllKeys()
 	// Taken off the list first: a send to a session that just ended detaches, and detaching
 	// releases the keys again (the Enter of an SSH "exit" is still held when the session ends).
 	const QSet<quint32> keys = std::exchange(m_pressed, {});
+	m_pressedKeysyms.clear();
 	const auto chords = std::exchange(m_chords, {});
 	m_stalePressed.unite(keys);
+	m_stalePressed.unite(std::exchange(m_mappedPressed, {}));
 	QSet<quint32> releases = keys;
 	for (const Chord& chord : chords)
 	{
