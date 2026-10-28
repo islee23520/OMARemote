@@ -19,7 +19,8 @@ Item {
                                                    : connection ? (connection.keyCapture || "auto") : "auto"
     readonly property string captureState: view.captureState
     readonly property bool live: !!session && Sessions.isActive(session)
-    readonly property bool canToggleCapture: live && resolvedCaptureMode !== "off"
+    readonly property bool canToggleCapture: showDesktop && !hasPrompt && current && !isSsh
+                                            && resolvedCaptureMode !== "off" && view.activeFocus && Window.active
     readonly property bool showDesktop: view.state === "connected" && live
     readonly property var prompt: view.prompt
     readonly property bool hasPrompt: prompt && prompt.kind !== undefined
@@ -136,9 +137,12 @@ Item {
         Keys.onPressed: function (event) {
             if (root.hostKey(event, true)) {
                 event.accepted = true
-            } else if (root.chord(event)) {
-                view.releaseAllKeys()
-                event.accepted = true
+            } else {
+                var handled = root.chord(event)
+                if (handled) {
+                    view.releaseAllKeys()
+                    event.accepted = true
+                }
             }
         }
         Keys.onReleased: function (event) {
@@ -271,13 +275,23 @@ Item {
     function chord(event) {
         if (!Keymap.isSessionChord(event, hostHeld))
             return false
+        if (event.key === Qt.Key_G) {
+            if (root.canToggleCapture) {
+                if (event.isAutoRepeat)
+                    return true
+                if (view.toggleShortcuts())
+                    return true
+            }
+            return Keymap.sessionKeys === "rctrl"
+        }
+        if (event.key === Qt.Key_Escape && root.canToggleCapture) {
+            view.releaseShortcuts()
+            return true
+        }
         if (event.key === Qt.Key_Home) root.navigate("home")
         else if (event.key === Qt.Key_PageDown) root.navigate("next")
         else if (event.key === Qt.Key_PageUp) root.navigate("previous")
         else if (event.key === Qt.Key_End && live) view.sendCtrlAltDel()
-        else if (event.key === Qt.Key_Escape && view.shortcutsCaptured) view.releaseShortcuts()
-        // One chord both ways: release while captured, take back while the release key left them.
-        else if (event.key === Qt.Key_G && root.canToggleCapture) view.shortcutsCaptured ? view.releaseShortcuts() : view.rearmShortcuts()
         else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && live) root.toggleFullscreen()
         else if (event.key === Qt.Key_K) root.navigate("keys")
         else if (event.key === Qt.Key_N) root.navigate("quick")

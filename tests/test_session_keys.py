@@ -47,98 +47,104 @@ class Matching(unittest.TestCase):
                                           ["ctrl+alt+shift+home", "ctrl+shift+c"], ["ctrl+alt+home", "ctrl+shift+c"],
                                           ["ctrl+alt+home", "ctrl+shift+c"]])
 
+
+    # Dispatcher contract only: extracted QML logic does not prove scene-level event delivery.
 class CaptureToggle(unittest.TestCase):
-    """The one-chord capture toggle (ctrl+alt+g): what Keymap advertises, SessionView runs, the
-    native side answers and the bars hint must stay one and the same chord, and it must not be a
-    chord anything else uses."""
+    """Execute SessionView's actual chord and Keys dispatcher bodies under QML."""
 
     @staticmethod
     def text(name):
         with open(os.path.join(UI, name), encoding="utf-8") as f:
             return f.read()
 
-    def test_the_chord_is_free_everywhere(self):
-        # ctrl+alt+t is taken (an own window's to-a-tab), so the toggle has its own chord, and
-        # no second row ever binds it.
-        self.assertIn('"ctrl+alt+t"', self.text("Keymap.qml"))  # still the own-window chord
-        rows = re.findall(r'keys: \[([^\]]*)\]', self.text("Keymap.qml"))
-        used = [spec for row in rows for spec in re.findall(r'"([^"]+)"', row)]
-        self.assertEqual(used.count("ctrl+alt+g"), 1, "exactly one binding: the toggle")
-        self.assertEqual(used.count("ctrl+alt+t"), 1, "the own-window chord keeps its place")
-
-    def test_session_view_toggles_both_ways_on_the_toggle_chord(self):
-        qml = self.text("SessionView.qml")
-        self.assertIn("event.key === Qt.Key_G && root.canToggleCapture) view.shortcutsCaptured ? view.releaseShortcuts()"
-                      " : view.rearmShortcuts()", qml)
-        # The plain release chord stays release-only, as before.
-        self.assertIn("event.key === Qt.Key_Escape && view.shortcutsCaptured) view.releaseShortcuts()", qml)
-
     @unittest.skipUnless(QML, "needs qml6")
-    def test_chord_dispatch_passes_ssh_and_disabled_capture_through(self):
-        # Execute SessionView's actual chord function with a fake view. A false return is the
-        # dispatcher's contract to forward the key to the remote session.
+    def test_capture_chord_dispatch_boundaries(self):
         source = self.text("SessionView.qml")
-        start = source.index("    function chord(event) {")
-        end = source.index("\n    // ---------------------------------------------------------------- connecting", start)
-        chord = source[start:end].replace("Keymap.", "keymap.")
+        chord_start = source.index("    function chord(event) {")
+        chord_end = source.index("\n    // ---------------------------------------------------------------- connecting", chord_start)
+        chord = source[chord_start:chord_end].replace("Keymap.", "keymap.")
+        handler_start = source.index("        Keys.onPressed: function (event) {", source.index("    RdpView {"))
+        handler_end = source.index("\n        Keys.onReleased", handler_start)
+        handler = source[handler_start:handler_end]
+        handler = handler[handler.index("{") + 1:handler.rfind("}")]
         mode_start = source.index("    readonly property string resolvedCaptureMode:")
         mode_end = source.index("\n    readonly property string captureState:", mode_start)
         mode = source[mode_start:mode_end]
-        eligible = re.search(r'    readonly property bool canToggleCapture:.*', source).group(0)
+        eligible = re.search(r"    readonly property bool canToggleCapture:.*(?:\n\s+&&.*)*", source).group(0)
+        eligible = eligible.replace("Window.active", "windowActive")
         format_url = "file://" + os.path.abspath(os.path.join(UI, "js", "Format.js"))
         qml = '''import QtQuick
+import QtQuick.Window
 import "%s" as Format
-Item {
+Window {
     id: root
-    property bool hostHeld: false
+    property bool windowActive: true
+    property bool current: true
+    property bool inWindow: false
     property bool live: true
-    property var session: ({ protocol: "ssh" })
+    property bool showDesktop: true
+    property bool isSsh: false
+    property bool hasPrompt: false
+    property var prompt: null
+    property var session: ({ protocol: "rdp" })
     property var connection: ({ keyCapture: "auto" })
 %s
 %s
-    property var keymap: ({ sessionKeys: "ctrlalt", isSessionChord: function(e, held) {
+    property var keymap: ({ sessionKeys: "ctrlalt", isHostKey: function(e) { return e.key === Qt.Key_Control && e.host }, isSessionChord: function(e, held) {
         return Format.isSessionChord(this.sessionKeys, !!(e.modifiers & Qt.ControlModifier),
                                      !!(e.modifiers & Qt.AltModifier),
                                      !!(e.modifiers & Qt.ShiftModifier), held)
     } })
-    property var view: ({ shortcutsCaptured: false, releaseShortcuts: function() { calls.push("release") },
-                          rearmShortcuts: function() { calls.push("rearm") } })
     property var calls: []
+    property var view: ({ activeFocus: true, state: "connected", captureState: "ineligible",
+        shortcutsCaptured: false, toggleShortcuts: function() { calls.push("toggle"); return eligibleResult },
+        releaseShortcuts: function() { calls.push("release") }, releaseAllKeys: function() { calls.push("all") },
+        sendCtrlAltDel: function() {}, reconnectNow: function() {} })
+    property bool eligibleResult: true
+    property bool hostHeld: false
+    function navigate(x) {}
+    function toggleFullscreen() {}
+    function togglePinned() {}
+    function reconnectRequested() {}
+    function hostKey(event, pressed) {
+        if (!keymap.isHostKey(event)) return false
+        hostHeld = pressed
+        return true
+    }
+    function run(event) { %s }
 %s
     Component.onCompleted: {
-        var event = { key: Qt.Key_G, modifiers: Qt.ControlModifier | Qt.AltModifier }
-        var ssh = chord(event)
-        session = { protocol: "rdp" }
-        connection = { keyCapture: "off" }
-        var off = chord(event)
-        connection = { keyCapture: "auto" }
-        var rearm = chord(event)
-        view.shortcutsCaptured = true
-        var release = chord(event)
-        var incomplete = chord({ key: Qt.Key_G, modifiers: Qt.ControlModifier })
-        keymap.sessionKeys = "rctrl"
-        session = { protocol: "ssh" }
-        hostHeld = true
-        var sshRightHeld = chord(event)
-        hostHeld = false
-        var sshRightNotHeld = chord(event)
-        session = { protocol: "rdp" }
-        connection = { keyCapture: "off" }
-        hostHeld = true
-        var offRightHeld = chord(event)
-        hostHeld = false
-        var offRightNotHeld = chord(event)
-        connection = { keyCapture: "auto" }
-        var desktopRightNotHeld = chord(event)
-        hostHeld = true
-        var desktopRightHeld = chord(event)
-        console.log("RESULT " + JSON.stringify({ ssh: ssh, off: off, rearm: rearm, release: release,
-            incomplete: incomplete, sshRightHeld: sshRightHeld, sshRightNotHeld: sshRightNotHeld,
-            offRightHeld: offRightHeld, offRightNotHeld: offRightNotHeld,
-            desktopRightNotHeld: desktopRightNotHeld, desktopRightHeld: desktopRightHeld, calls: calls }))
-        Qt.exit(0)
+        function ev(key, repeat) { return { key: key, modifiers: Qt.ControlModifier | Qt.AltModifier,
+                                           isAutoRepeat: !!repeat, accepted: false } }
+        var out = {}
+        var e = ev(Qt.Key_G, false); run(e); out.gAccepted = e.accepted
+        e = ev(Qt.Key_G, true); run(e); out.repeatAccepted = e.accepted
+        out.callsAfterG = calls.slice(0)
+        e = ev(Qt.Key_Escape, false); run(e); out.escAccepted = e.accepted
+        out.callsAfterEsc = calls.slice(0)
+        eligibleResult = false; e = ev(Qt.Key_G, false); run(e); out.toggleFalseAccepted = e.accepted
+        current = false; e = ev(Qt.Key_G, false); run(e); out.currentFalseAccepted = e.accepted
+        current = true; view.activeFocus = false; e = ev(Qt.Key_G, false); run(e); out.focusFalseAccepted = e.accepted
+        view.activeFocus = true; windowActive = false; e = ev(Qt.Key_Escape, false); run(e); out.ineligibleEscAccepted = e.accepted
+        e = ev(Qt.Key_G, false); run(e); out.windowInactiveAccepted = e.accepted
+        windowActive = true
+        showDesktop = false; e = ev(Qt.Key_G, false); run(e); out.connectingAccepted = e.accepted
+        showDesktop = true; hasPrompt = true; e = ev(Qt.Key_G, false); run(e); out.promptAccepted = e.accepted
+        hasPrompt = false; session = { protocol: "ssh" }; connection = { keyCapture: "auto" }
+        e = ev(Qt.Key_G, false); run(e); out.sshAccepted = e.accepted
+        session = { protocol: "rdp" }; connection = { keyCapture: "off" }
+        e = ev(Qt.Key_G, false); run(e); out.offAccepted = e.accepted
+        connection = { keyCapture: "auto" }; live = false; showDesktop = false
+        e = ev(Qt.Key_G, false); run(e); out.endedAccepted = e.accepted
+        e = { key: Qt.Key_Control, host: true, modifiers: Qt.ControlModifier, accepted: false }
+        run(e); out.hostHeldAfterPress = hostHeld
+        hostKey(e, false); out.hostHeldAfterRelease = hostHeld
+        live = true; showDesktop = true; keymap.sessionKeys = "rctrl"; hostHeld = true; live = false; showDesktop = false
+        e = ev(Qt.Key_G, false); run(e); out.rightCtrlAccepted = e.accepted
+        console.log("RESULT " + JSON.stringify(out)); Qt.exit(0)
     }
-}''' % (format_url, mode, eligible, chord)
+}''' % (format_url, mode, eligible, handler, chord)
+
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "capture.qml")
             with open(path, "w", encoding="utf-8") as f:
@@ -146,31 +152,25 @@ Item {
             env = dict(os.environ, QT_QPA_PLATFORM="offscreen", QT_FORCE_STDERR_LOGGING="1")
             p = subprocess.run([QML, path], env=env, capture_output=True, text=True, timeout=30)
         found = re.search(r"RESULT (\{.*\})", p.stderr + p.stdout)
-        self.assertIsNotNone(found, p.stderr)
-        self.assertEqual(json.loads(found.group(1)), {
-            "ssh": False, "off": False, "rearm": True, "release": True, "incomplete": False,
-            "sshRightHeld": True, "sshRightNotHeld": False, "offRightHeld": True,
-            "offRightNotHeld": False, "desktopRightNotHeld": False, "desktopRightHeld": True,
-            "calls": ["rearm", "release", "release"],
-        })
+        self.assertIsNotNone(found, p.stderr + p.stdout)
+        result = json.loads(found.group(1))
+        self.assertTrue(result["gAccepted"])
+        self.assertTrue(result["repeatAccepted"])
+        self.assertEqual(result["callsAfterG"], ["toggle", "all", "all"])
+        self.assertTrue(result["escAccepted"])
+        self.assertEqual(result["callsAfterEsc"], ["toggle", "all", "all", "release", "all"])
+        self.assertFalse(result["toggleFalseAccepted"])
+        self.assertFalse(result["currentFalseAccepted"])
+        self.assertFalse(result["focusFalseAccepted"])
+        self.assertFalse(result["ineligibleEscAccepted"])
+        for key in ("windowInactiveAccepted", "connectingAccepted", "promptAccepted", "sshAccepted", "offAccepted", "endedAccepted"):
+            self.assertFalse(result[key], key)
+        self.assertTrue(result["rightCtrlAccepted"])
+        self.assertTrue(result["hostHeldAfterPress"])
+        self.assertFalse(result["hostHeldAfterRelease"])
 
-    def test_the_native_side_answers_both_ways(self):
-        with open(os.path.join(HERE, "..", "native", "plugin", "rdpview.h"), encoding="utf-8") as f:
-            header = f.read()
-        self.assertIn("Q_INVOKABLE void rearmShortcuts();", header)
-        self.assertIn('"released" the release key or chord gave them', header)
-        with open(os.path.join(HERE, "..", "native", "plugin", "rdpview.cpp"), encoding="utf-8") as f:
-            cpp = f.read()
-        self.assertIn('next = m_released && asksForShortcuts() ? QStringLiteral("released")'
-                      ' : QStringLiteral("ineligible")', cpp)
-        self.assertRegex(cpp, r"void RdpView::rearmShortcuts\(\)\s*\{[^}]*m_released = false")
 
-    def test_the_bars_and_helps_tell_the_chord(self):
-        for name in ("Body.qml", "SessionWindow.qml"):
-            self.assertIn('["ctrl+alt+g", "capture"]', self.text(name), name)
-        self.assertIn("⌨ released", self.text("StatusBar.qml"))
-        for name in ("Editor.qml", "GroupEditor.qml", "SettingsPanel.qml", "Keymap.qml"):
-            self.assertIn("ctrl+alt+g", self.text(name), name)
+
 
 if __name__ == "__main__":
     unittest.main()

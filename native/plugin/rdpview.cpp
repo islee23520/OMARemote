@@ -126,12 +126,14 @@ void RdpView::tryAttach()
 void RdpView::detach()
 {
 	m_attachTimer.stop();
-	if (m_fd < 0)
-		return;
-	// A failed send detaches on its own: then there is nothing left to do here.
+	m_captureOverride = CaptureOverride::FollowConfig;
+	m_inhibit.release();
 	loseKeyboard();
 	if (m_fd < 0)
+	{
+		updateCaptureState();
 		return;
+	}
 	delete m_notifier;
 	m_notifier = nullptr;
 	close(m_fd);
@@ -148,6 +150,7 @@ void RdpView::detach()
 	emit attachedChanged();
 	updateCapture();
 }
+
 
 void RdpView::send(const QByteArray& line)
 {
@@ -385,13 +388,29 @@ void RdpView::setState(const QString& state, int code)
 {
 	if (state == m_state && code == m_exitCode)
 		return;
+	const bool lostConnected = m_state == QLatin1String("connected") && state != QLatin1String("connected");
+	const bool resumedConnected = m_state != QLatin1String("connected") && state == QLatin1String("connected");
 	m_state = state;
 	m_exitCode = code;
-	if (state == QLatin1String("ended") || state == QLatin1String("failed") || state == QLatin1String("detached"))
+	if (lostConnected)
+	{
+		m_captureOverride = CaptureOverride::FollowConfig;
+		m_inhibit.release();
 		loseKeyboard();
+	}
 	updateCapture();
 	emit stateChanged();
+	// Reconnect may follow a blur while this item remained focused. Restore backend focus
+	// only when the connected canvas still owns local input.
+	if (resumedConnected && m_fd >= 0 && hasActiveFocus() && isVisible() && window() && window()->isActive())
+	{
+		m_keyboardBlurred = false;
+		send("focus " + QByteArray::number(kSyncNum));
+		if (m_fd >= 0)
+			sendClipboard(true);
+	}
 }
+
 
 // ---------------------------------------------------------------- framebuffer
 
@@ -648,11 +667,16 @@ void RdpView::itemChange(ItemChange change, const ItemChangeData& value)
 		scheduleSize();
 	if (change == ItemSceneChange)
 	{
-		if (m_inhibit.held() || m_buttons != Qt::NoButton)
-			loseKeyboard();
+		m_captureOverride = CaptureOverride::FollowConfig;
+		loseKeyboard();
 		m_inhibit.release(); // held for the old window
 		if (value.window)
-			connect(value.window, &QWindow::activeChanged, this, &RdpView::updateCapture, Qt::UniqueConnection);
+			connect(value.window, &QWindow::activeChanged, this, &RdpView::onWindowActiveChanged, Qt::UniqueConnection);
+	}
+	if (change == ItemVisibleHasChanged && !value.boolValue)
+	{
+		m_captureOverride = CaptureOverride::FollowConfig;
+		loseKeyboard();
 	}
 	if (change == ItemVisibleHasChanged || change == ItemSceneChange)
 		updateCapture();
@@ -666,21 +690,32 @@ void RdpView::itemChange(ItemChange change, const ItemChangeData& value)
 	}
 }
 
-// The asking, without the release latch: a live session, the keyboard, and the mode's own
-// conditions (the pointer on the picture for "auto").
+bool RdpView::captureContextEligible() const
+{
+	return (m_sessionProtocol == QLatin1String("rdp") || m_sessionProtocol == QLatin1String("vnc") ||
+	        m_sessionProtocol == QLatin1String("gliff")) &&
+	       m_state == QLatin1String("connected") && m_fd >= 0 &&
+	       m_keyCaptureMode != QLatin1String("off") && hasActiveFocus() && isVisible() &&
+	       window() && window()->isActive();
+}
+
 bool RdpView::asksForShortcuts() const
 {
-	if (m_keyCaptureMode == QLatin1String("off") || m_fd < 0 ||
-	    m_state == QLatin1String("ended") || m_state == QLatin1String("failed"))
+	if (!captureContextEligible())
 		return false;
-	if (!hasActiveFocus() || !isVisible() || !window() || !window()->isActive())
-		return false;
-	return m_keyCaptureMode == QLatin1String("on") || (m_captureShortcuts && m_pointerInside);
+	switch (m_captureOverride)
+	{
+		case CaptureOverride::Requested: return true;
+		case CaptureOverride::Released: return false;
+		case CaptureOverride::FollowConfig: return m_keyCaptureMode == QLatin1String("on") ||
+			(m_sessionProtocol == QLatin1String("gliff") && m_captureShortcuts && m_pointerInside);
+	}
+	return false;
 }
 
 bool RdpView::captureEligible() const
 {
-	return !m_released && asksForShortcuts();
+	return asksForShortcuts();
 }
 
 QString RdpView::captureState() const
@@ -696,12 +731,14 @@ bool RdpView::shortcutsCaptured() const
 void RdpView::updateCaptureState()
 {
 	QString next;
-	if (m_keyCaptureMode == QLatin1String("off"))
+	if (m_keyCaptureMode == QLatin1String("off") || m_sessionProtocol == QLatin1String("ssh"))
 		next = QStringLiteral("off");
-	else if (!captureEligible())
-		// The latch alone keeps a still-asking view from the shortcuts; anything else (focus,
-		// hidden, the session gone) is plain ineligibility whatever the latch says.
-		next = m_released && asksForShortcuts() ? QStringLiteral("released") : QStringLiteral("ineligible");
+	else if (!captureContextEligible())
+		next = QStringLiteral("ineligible");
+	else if (m_captureOverride == CaptureOverride::Released)
+		next = QStringLiteral("released");
+	else if (!asksForShortcuts())
+		next = QStringLiteral("ineligible");
 	else if (!ShortcutInhibit::supported())
 		next = QStringLiteral("unsupported");
 	else
@@ -711,11 +748,6 @@ void RdpView::updateCaptureState()
 	const bool before = shortcutsCaptured();
 	m_captureState = next;
 	const bool active = shortcutsCaptured();
-	// Leaving real capture lifts every tracked key here, before the RDP gate closes, so no
-	// key stays pressed on the remote for shortcuts it no longer owns (the release key, a
-	// compositor escape, a mode change). The keyboard itself may still be ours: no blur, and
-	// never a mouse release. The sets are already empty when the transition that caused this
-	// lifted the keys (focus out, hide, the session ending), so nothing is sent twice.
 	if (before && !active)
 		releaseAllKeys();
 	if (before != active && m_sessionProtocol == QLatin1String("rdp"))
@@ -727,58 +759,65 @@ void RdpView::updateCaptureState()
 
 void RdpView::onInhibitActivation()
 {
-	// A compositor re-enable produces another active event; it never overrides our gating.
 	if (m_inhibit.activated() && !captureEligible())
 		m_inhibit.release();
 	updateCaptureState();
 }
 
+void RdpView::onWindowActiveChanged()
+{
+	if (!window() || !window()->isActive())
+	{
+		m_captureOverride = CaptureOverride::FollowConfig;
+		m_inhibit.release();
+		loseKeyboard();
+	}
+	updateCapture();
+}
+
 void RdpView::updateCapture()
 {
-	const bool held = m_inhibit.held();
-	const bool hadInput = held || !m_pressed.isEmpty() || !m_chords.isEmpty() || m_buttons != Qt::NoButton;
-	if (captureEligible())
+	const bool ownershipLost = m_state != QLatin1String("connected") || m_fd < 0 ||
+	    !hasActiveFocus() || !isVisible() || !window() || !window()->isActive();
+	if (ownershipLost)
+	{
+		m_captureOverride = CaptureOverride::FollowConfig;
+		m_inhibit.release();
+		loseKeyboard();
+	}
+	else if (captureEligible())
 		m_inhibit.inhibit(window());
 	else
 		m_inhibit.release();
-	// The keyboard left with the shortcuts (focus out already ran, or the tab was hidden, the
-	// window deactivated): no release can arrive for keys still held, and the compositor
-	// restored its own shortcuts without a word. The release key and the pointer leaving
-	// ("auto") keep the keyboard; their keys are lifted where those events are handled.
-	if (hadInput && !m_inhibit.held() &&
-	    (!hasActiveFocus() || !isVisible() || !window() || !window()->isActive()))
-		loseKeyboard();
 	updateCaptureState();
 }
 
 void RdpView::loseKeyboard()
 {
-	// Set before sending: a broken socket can recursively detach during cleanup.
 	const bool blur = !m_keyboardBlurred;
 	m_keyboardBlurred = true;
 	releaseAllKeys();
-	// The buttons go with the keyboard: whatever took the window or the grab away leaves no
-	// release to come, and a remote button left down selects or drags by itself.
 	releaseHeldButtons();
 	if (blur)
 		send("blur");
 }
 
-void RdpView::releaseShortcuts()
+bool RdpView::toggleShortcuts()
 {
-	if (!shortcutsCaptured())
-		return;
-	m_released = true;
+	if (!captureContextEligible())
+		return false;
+	m_captureOverride = asksForShortcuts() ? CaptureOverride::Released : CaptureOverride::Requested;
 	updateCapture();
+	return true;
 }
 
-void RdpView::rearmShortcuts()
+void RdpView::releaseShortcuts()
 {
-	// The release key's counterpart: the latch is the only thing keeping a still-asking view
-	// from the shortcuts (a click, the pointer re-entering or focus arriving does the same).
-	if (!m_released)
+	if (!captureContextEligible() || (!asksForShortcuts() && !m_inhibit.held()))
 		return;
-	m_released = false;
+	m_captureOverride = CaptureOverride::Released;
+	// Escape is consumed locally; release remote keys without blurring or cancelling a drag.
+	releaseAllKeys();
 	updateCapture();
 }
 
@@ -787,6 +826,7 @@ void RdpView::setCaptureShortcuts(bool capture)
 	if (capture == m_captureShortcuts)
 		return;
 	m_captureShortcuts = capture;
+	m_captureOverride = CaptureOverride::FollowConfig;
 	emit captureShortcutsChanged();
 	updateCapture();
 }
@@ -798,6 +838,7 @@ void RdpView::setKeyCaptureMode(const QString& mode)
 	if (normalized == m_keyCaptureMode)
 		return;
 	m_keyCaptureMode = normalized;
+	m_captureOverride = CaptureOverride::FollowConfig;
 	emit keyCaptureModeChanged();
 	updateCapture();
 }
@@ -806,12 +847,15 @@ void RdpView::setSessionProtocol(const QString& protocol)
 {
 	if (protocol == m_sessionProtocol)
 		return;
+	m_captureOverride = CaptureOverride::FollowConfig;
+	m_inhibit.release();
+	// Notify the old RDP backend before changing the protocol used by capture-state updates.
 	if (m_sessionProtocol == QLatin1String("rdp") && shortcutsCaptured())
 		send("capture 0");
+	loseKeyboard();
 	m_sessionProtocol = protocol;
-	if (protocol == QLatin1String("rdp") && shortcutsCaptured())
-		send("capture 1");
 	emit sessionProtocolChanged();
+	updateCapture();
 }
 
 void RdpView::scheduleSize()
@@ -858,11 +902,6 @@ static int buttonNumber(Qt::MouseButton b)
 void RdpView::mousePressEvent(QMouseEvent* e)
 {
 	forceActiveFocus(Qt::MouseFocusReason);
-	if (m_released)
-	{
-		m_released = false;
-		updateCapture();
-	}
 	const int b = buttonNumber(e->button());
 	const QPoint p = toRemote(e->position());
 	if (b)
@@ -916,15 +955,11 @@ void RdpView::releaseHeldButtons()
 	}
 }
 
-// The shortcuts follow the pointer, as in Gliff's own client: taken when it comes onto the picture,
-// given back (and the keys held on the remote let go) when it leaves; a release by key lasts until
-// then.
+// The pointer only changes FollowConfig for Gliff Auto; explicit requests remain session-local.
 void RdpView::hoverEnterEvent(QHoverEvent* e)
 {
 	QQuickItem::hoverEnterEvent(e);
 	m_pointerInside = true;
-	if (m_keyCaptureMode == QLatin1String("on"))
-		m_released = false;
 	updateCapture();
 }
 
@@ -932,20 +967,13 @@ void RdpView::hoverLeaveEvent(QHoverEvent* e)
 {
 	QQuickItem::hoverLeaveEvent(e);
 	m_pointerInside = false;
-	// "auto" only: the pointer leaving gives the shortcuts back and lifts the keys held on the
-	// remote (as in Gliff's own client, and without a blur: the keyboard stays). "on" ignores
-	// the pointer: the shortcuts and the keys stay.
-	if (m_keyCaptureMode == QLatin1String("on"))
-	{
-		updateCapture();
-		return;
-	}
-	m_released = false;
-	const bool held = m_inhibit.held();
+	const bool wasHeld = m_inhibit.held();
 	updateCapture();
-	if (held)
+	if (wasHeld && m_captureOverride == CaptureOverride::FollowConfig &&
+	    m_sessionProtocol == QLatin1String("gliff") && m_keyCaptureMode == QLatin1String("auto"))
 		releaseAllKeys();
 }
+
 
 void RdpView::hoverMoveEvent(QHoverEvent* e)
 {
@@ -1039,25 +1067,28 @@ void RdpView::keyPressEvent(QKeyEvent* e)
 	}
 	m_keyboardBlurred = false;
 	// Release consumes the key locally and lifts every remote key before returning shortcuts.
-	if (shortcutsCaptured() && !e->isAutoRepeat())
+	if (asksForShortcuts() || m_inhibit.held())
 	{
-		const Qt::KeyboardModifiers mods = e->modifiers() & ~Qt::KeypadModifier;
-		bool release = false;
-		if (m_releaseKey == QLatin1String("shift+escape"))
-			release = e->key() == Qt::Key_Escape && mods == Qt::ShiftModifier;
-		else if (m_releaseKey == QLatin1String("double-escape") && e->key() == Qt::Key_Escape && mods == Qt::NoModifier)
+		if (!e->isAutoRepeat())
 		{
-			const qint64 now = QDateTime::currentMSecsSinceEpoch();
-			release = now - m_lastEscape < 400;
-			m_lastEscape = release ? 0 : now;
-		}
-		if (release)
-		{
-			m_released = true;
-			updateCapture();
-			m_stalePressed.insert(evdev);
-			e->accept();
-			return;
+			const Qt::KeyboardModifiers mods = e->modifiers() & ~Qt::KeypadModifier;
+			bool release = false;
+			if (m_releaseKey == QLatin1String("shift+escape"))
+				release = e->key() == Qt::Key_Escape && mods == Qt::ShiftModifier;
+			else if (m_releaseKey == QLatin1String("double-escape") && e->key() == Qt::Key_Escape && mods == Qt::NoModifier)
+			{
+				const qint64 now = QDateTime::currentMSecsSinceEpoch();
+				release = now - m_lastEscape < 400;
+				m_lastEscape = release ? 0 : now;
+			}
+			if (release)
+			{
+				releaseAllKeys();
+				releaseShortcuts();
+				m_stalePressed.insert(evdev);
+				e->accept();
+				return;
+			}
 		}
 	}
 	// Explicit desktop mappings only. An action is an ordered list of evdev:keysym pairs;
@@ -1244,7 +1275,6 @@ void RdpView::focusInEvent(QFocusEvent* e)
 {
 	QQuickItem::focusInEvent(e);
 	m_keyboardBlurred = false;
-	m_released = false;
 	updateCapture();
 	// Bring the remote toggle keys in line with ours; Qt has no lock-state query, so Num Lock on
 	// and the rest off is the common case, and the keys themselves still toggle normally.
@@ -1291,6 +1321,8 @@ void RdpView::cancelReconnect()
 void RdpView::focusOutEvent(QFocusEvent* e)
 {
 	QQuickItem::focusOutEvent(e);
+	m_captureOverride = CaptureOverride::FollowConfig;
+	m_inhibit.release();
 	loseKeyboard();
 	updateCapture();
 }

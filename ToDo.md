@@ -1,6 +1,6 @@
 # ToDo — Input reliability implementation plan
 
-**Current phase: M1 plus the M2 profile/mapping controls on an M1-based port; live activation and IME acceptance pending.** The port applies M2 commit `7e28d08` on `3d61349` rather than inheriting its M3, CapsLock, and later capture-chord ancestors. M1 verification below was recorded previously; the M2 results below belong to the original M2 ancestry, not this port. Connection capture policy, QML integration, real Wayland `active`/`inactive` listeners, the runtime RDP Super gate, and keyboard cleanup are implemented. A real activation/release-chord test remains unavailable without an authorized live session.
+**Current module: session-local capture toggle and input ownership boundaries.** This branch starts at the integrated M1–M5 candidate `b51abea`; historical port descriptions below do not describe the current ancestry. Verify locally and push this module before beginning any conditional pixel-scroll work. Live compositor, Herdr, and remote acceptance remain pending user-operated checks.
 
 ## M1 — Diagnose input ownership and implement focused capture
 
@@ -8,25 +8,18 @@
 - [ ] With the user's remote sessions available and live testing authorized, trace canvas focus, QML host shortcut precedence, native key metadata, IME consumption/commit, and backend delivery. Inspection found fcitx5 US/Hangul and `input.lua` `kb_options = caps:none`, but the Caps Lock description in `~/.config/fcitx5/config` is a comment only and `[Hotkey/TriggerKeys]` is empty. These establish neither an effective runtime/default binding nor its absence: CapsLock remains an unconfirmed candidate. Verify the effective active binding and actual raw events/IME consumption before choosing a source trigger; do not assume CapsLock, dedicated Hangul, or Right Alt input. Distinguish local compositor interception from IME interception and application forwarding. Do not log typed text/secrets. A received event is not proof of a remote IME transition.
 - [x] Reuse Gliff's shortcut-inhibit path for embedded desktop capture; implement connection/group `keyCapture`, SSH off, and runtime RDP capture permission separate from stored `grabKeyboard`.
 - [x] Wire actual `active`/`inactive` listeners and independent eligibility fallback; expose requested-versus-actual state and editor controls.
-- [x] Register the generic session release chord through Keymap/SessionView and retain explicit rearm. Activation-dependent runtime release remains a live acceptance item below.
+- [x] Register generic release and capture-toggle chords through Keymap/SessionView; capture uses a per-session toggle request and release-only Esc behavior, with compositor activation still a live acceptance item.
 - [x] Implement tracked-key/modifier cleanup and stale-repeat suppression without synthesizing mouse releases; exercise real RdpView/socket boundaries in `rdpview-keys-test`.
 - [x] Add behavioral settings/key-cleanup coverage and user documentation. The permanent native regression runs as `QT_QPA_PLATFORM=offscreen native/build/rdpview-keys-test`; full-suite results are recorded under "M1 implementation and local verification" below.
-- [x] Add the capture-toggle session chord (`ctrl+alt+g`, an unused chord; `ctrl+alt+t` is taken
-  by own-window-to-tab): release while captured, take the shortcuts back through the new
-  `rearmShortcuts()` without a click, with a truthful `released` capture state between. The
-  chord follows Settings › Keyboard like every session chord; live activation remains an item
-  below.
+- [x] Add `ctrl+alt+g` capture toggle for eligible connected RDP/VNC/Gliff canvases: Auto VNC/RDP may request capture; repeats do not retoggle; release Esc cancels pending/active requests. No persistent setting is added.
 
 ### M1 live acceptance
 
 - [ ] In each supported desktop protocol, compare capture off/on with local shortcuts and remote key delivery. Confirm actual activation, unsupported/refused inhibition, and compositor deactivation show truthful status.
 - [ ] Verify pointer-inside/outside behavior for auto/on modes without stealing focus. Test manager fields, connection editor, popup, tab/window switch, hide/show, reconnect, and window deactivation.
-- [ ] Hold modifiers/keys through escape, focus loss, and disconnect: no remote stuck keys, duplicate releases, local modifier contamination, or replay into another session. Escape remains usable while captured; recapture requires the intended rearming action.
+- [ ] Hold modifiers/keys through Esc, focus loss, and disconnect: no remote stuck keys, duplicate releases, local modifier contamination, or replay into another session. Esc remains usable while requested/captured; only a fresh explicit G toggle requests capture after release or ownership loss.
 - [ ] Verify stored RDP Super forwarding and the capture policy produce the documented effective backend gate, including restoration when capture ends; compositor inhibition alone must not leave Super silently discarded. Record observed results and limitations rather than treating protocol support as live proof.
-- [ ] Press the toggle chord on a captured desktop (RDP/VNC `on`, Gliff auto): the status bar
-  shows ⌨ captured → ⌨ released, compositor shortcuts work again, and the same chord takes the
-  shortcuts back (⌨ captured) without a click; a key typed between the two still reaches the
-  remote. RDP: verify Super delivery follows the toggled state.
+- [ ] Press the toggle chord in Auto connected VNC/RDP and On/Gliff Auto: status follows requested then compositor-active/released states; repeats do not retoggle; a fresh G requests again after release. RDP: verify Super delivery follows active state.
 
 ### M1 implementation and local verification
 
@@ -34,29 +27,15 @@ Behavior landed: per-connection and group `keyCapture` (`auto`/`on`/`off`, Gliff
 policy preserved in auto, SSH off); requested mode kept separate from actual state, driven by
 the real Wayland inhibitor `active`/`inactive` events with independent eligibility ending
 capture on focus/visibility/window/session loss (the compositor may restore shortcuts without
-`inactive`); a compositor escape does not recreate the inhibitor against the user's decision;
-the configured session-prefix + Esc releases active capture for any desktop protocol; RDP
-runtime `capture 0|1` widens stored `grabKeyboard` without changing it, Super releases always
-pass the gate; leaving actual capture lifts every tracked key and synthetic modifier exactly
-once before the RDP gate closes, without blur unless the keyboard really left and without
-synthesizing mouse releases, with stale repeats and duplicate late releases suppressed until a
-fresh press.
+`inactive`); session-local Requested/Released overrides make Auto VNC/RDP capture togglable without
+persisted settings, while Gliff Auto keeps its pointer-inside policy; connected ownership loss
+resets transient requests and clears keys/buttons even with empty input tracking; mode Off and
+pointer leave do not cancel a normal drag. The configured session-prefix + Esc releases pending or
+active requests; Ctrl+Alt+G toggles request intent, while status becomes `active` only on a real
+compositor activation event. RDP `capture 0|1` follows actual activation transitions. Cleanup
+clears tracking before sends, preserving stale-repeat and late-release suppression.
 
-- `ninja -C native/build`: succeeded, no new warnings (CMake's existing GuiPrivate coupling
-  warning and absent optional Vulkan headers aside).
-- `QT_QPA_PLATFORM=offscreen native/build/rdpview-keys-test`: `ok` — real RdpView over real
-  Unix sockets: press/repeat/release delivery, cleanup once, stale-repeat and late-release
-  suppression, fresh presses after cleanup and socket replacement, synthetic Ctrl pairing,
-  session end, pointer exit with a focused window in on mode, truthful
-  unsupported/off/ineligible reporting.
-- `native/build/rdp-gfx-test` and `native/build/gliff-proto-test`: `ok`.
-- `python3 -m unittest discover tests`, run once after integration: 393 tests, 112.8 s, OK
-  (Python's own ResourceWarnings and a threaded-fork DeprecationWarning were not suppressed
-  or diagnosed).
-- Isolated offscreen Quickshell runs loaded the real SessionView, Store, Sessions and native
-  plugin against local synthetic session sockets: RDP and VNC resolved `keyCapture=on`,
-  attached live, reported `unsupported` while focused and `ineligible` after focus moved;
-  SSH resolved and reported `off`. Local wiring checks, not compositor-activation proof.
+- Isolated verification: the complete `rdpview-keys-test`, `rdp-gfx-test`, and `gliff-proto-test` passed; `python3 -m unittest discover tests` ran 420 tests successfully before removing one source-string pinning test, after which all six behavioral session-key tests passed. Python reported subprocess/socket ResourceWarnings and a threaded-fork DeprecationWarning. An empty-config offscreen manager exited 0, logged `Configuration Loaded`, and rendered the manager PNG; this is not proof of Wayland activation or remote input.
 
 No live compositor or remote pass is claimed: installed Hyprland 0.56.2 rejects `--headless`
 and an isolated Aquamarine startup could not acquire a seat (logind busy) nor allocate after

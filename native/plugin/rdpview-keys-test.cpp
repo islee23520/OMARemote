@@ -10,7 +10,7 @@
 #include <QTemporaryFile>
 #include <QMouseEvent>
 #include <QWheelEvent>
-
+#include <QFocusEvent>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -30,6 +30,12 @@ static void expect(bool ok, const char* what)
 		printf("FAIL %s\n", what);
 		std::exit(1);
 	}
+}
+static void expectWire(const QByteArray& actual, const QByteArray& expected, const char* what)
+{
+	if (actual != expected)
+		fprintf(stderr, "Actual wire: %s\nExpected wire: %s\n", actual.constData(), expected.constData());
+	expect(actual == expected, what);
 }
 
 // The view under test, with the protected event handlers reachable (the window would call them).
@@ -263,13 +269,26 @@ int main(int argc, char** argv)
 		QKeyEvent aUp = key(30, Qt::Key_A, false);
 		v.keyPressEvent(&a); v.keyReleaseEvent(&aUp); v.keyReleaseEvent(&ctrlUp);
 		expect(s.heard() == "key 1 30 97\nkey 0 30\n", "mapped Ctrl is not synthesized for subsequent keys");
+	}
+	{
+		Session s;
+		expect(s.start(path), "unsupported RDP mapping session listens");
+		TestView v;
+		expect(s.acceptFrom(&v, path), "unsupported RDP mapping view attaches");
 		v.setSessionProtocol("rdp");
+		s.say("state connected");
+		expect(waitUntil([&] { return v.state() == QLatin1String("connected"); }), "RDP mapping session connects");
+		s.heard(); // discard connection setup before checking key wire output
+		v.setProperty("inputProfile", "custom");
 		v.setProperty("inputTrigger1", "58");
 		v.setProperty("inputAction1", "29:65507+183:65482");
-		v.keyPressEvent(&caps); v.keyReleaseEvent(&capsUp);
-		expect(s.heard() == "key 1 58 65509\nkey 0 58\n", "unsupported RDP action is never partly emitted");
+		QKeyEvent unsupported = key(58, Qt::Key_CapsLock, true, false, Qt::NoModifier, 65509);
+		v.keyPressEvent(&unsupported);
+		QKeyEvent unsupportedUp = key(58, Qt::Key_CapsLock, false);
+		v.keyReleaseEvent(&unsupportedUp);
+		const QByteArray wire = s.heard();
+		expectWire(wire, "key 1 58 65509\nkey 0 58\n", "unsupported RDP action falls back unchanged without partial emission");
 	}
-
 	// SSH receives unkeyed text separately, and keyed text only on its key line.
 	{
 		Session s;
@@ -304,9 +323,13 @@ int main(int argc, char** argv)
 		QQuickWindow window;
 		TestView v;
 		expect(s.acceptFrom(&v, path), "the mouse view attaches");
+		v.setSessionProtocol(QStringLiteral("vnc"));
+		s.say("state connected");
+		expect(waitUntil([&] { return v.state() == QLatin1String("connected"); }), "the mouse session connects");
 		frame(s, v);
 		v.setKeyCaptureMode(mode);
 		expect(focusInView(v, window), "the mouse view owns a focused window");
+		s.heard(); // exclude setup focus and blur messages
 		mouse(v, QEvent::MouseButtonPress, Qt::LeftButton);
 		QWheelEvent wheel(QPointF(40, 50), QPointF(40, 50), QPoint(), QPoint(0, 120),
 		                  Qt::LeftButton, Qt::NoModifier, Qt::NoScrollPhase, false);
@@ -327,13 +350,18 @@ int main(int argc, char** argv)
 	{
 		Session s;
 		expect(s.start(path), "the cleanup session listens");
+		QQuickWindow window;
 		TestView v;
 		expect(s.acceptFrom(&v, path), "the cleanup view attaches");
+		v.setSessionProtocol(QStringLiteral("vnc"));
 		frame(s, v);
-		mouse(v, QEvent::MouseButtonPress, Qt::LeftButton);
-		mouse(v, QEvent::MouseButtonPress, Qt::RightButton);
-		mouse(v, QEvent::MouseMove, Qt::NoButton, QPointF(65, 75));
+		expect(focusInView(v, window), "the cleanup view owns a focused window");
+		s.say("state connected");
+		expect(waitUntil([&] { return v.state() == QLatin1String("connected"); }), "the cleanup session connects");
 		s.heard();
+		mouse(v, QEvent::MouseButtonPress, Qt::LeftButton, QPointF(65, 75));
+		mouse(v, QEvent::MouseButtonPress, Qt::RightButton, QPointF(65, 75));
+		s.heard(); // exclude the presses; verify only cleanup below
 		QFocusEvent out(QEvent::FocusOut);
 		for (int i = 0; i < 2; ++i)
 		{
@@ -345,9 +373,9 @@ int main(int argc, char** argv)
 		mouse(v, QEvent::MouseButtonRelease, Qt::LeftButton);
 		mouse(v, QEvent::MouseButtonRelease, Qt::RightButton);
 		lines = s.heard();
-		expect(lines.count("button 1 0 65 75\n") == 1 &&
-		           lines.count("button 2 0 65 75\n") == 1 && lines.count("button ") == 2,
-		       "cleanup lifts each button once at the last sent position and suppresses late ups");
+		expectWire(lines, QByteArray("button 1 0 65 75\nbutton 2 0 65 75\n") +
+		                      (ungrab ? QByteArray() : QByteArray("blur\n")),
+		           "cleanup emits exact per-button releases at last sent position");
 		expect(lines.count("blur\n") == (ungrab ? 0 : 1),
 		       "focus loss blurs once, mouse ungrab never blurs");
 		mouse(v, QEvent::MouseButtonPress, Qt::LeftButton);
@@ -368,6 +396,9 @@ int main(int argc, char** argv)
 		expect(s.acceptFrom(&v, path), "the lifecycle view attaches");
 		frame(s, v);
 		expect(focusInView(v, window), "the lifecycle view owns a focused window");
+		v.setSessionProtocol(QStringLiteral("vnc"));
+		s.say("state connected");
+		expect(waitUntil([&] { return v.state() == QLatin1String("connected"); }), "the lifecycle session connects");
 		mouse(v, QEvent::MouseButtonPress, Qt::MiddleButton);
 		s.heard();
 		if (cleanup == 0)
@@ -393,6 +424,7 @@ int main(int argc, char** argv)
 		expect(s.start(path), "the old mouse session listens");
 		TestView v;
 		expect(s.acceptFrom(&v, path), "the old mouse view attaches");
+		frame(s, v);
 		mouse(v, QEvent::MouseButtonPress, Qt::LeftButton);
 		s.heard();
 		if (died)
@@ -405,8 +437,8 @@ int main(int argc, char** argv)
 		expect(next.start(replacement), "the replacement mouse session listens");
 		expect(next.acceptFrom(&v, replacement), "the mouse view attaches to the replacement");
 		if (!died)
-			expect(s.heard().count("button 1 0") == 1,
-			       "live replacement releases the button to the old session");
+			expectWire(s.heard(), "button 1 0 20 30\n",
+			           "live replacement lifts the held button on old session before detach");
 		mouse(v, QEvent::MouseButtonRelease, Qt::LeftButton);
 		v.mouseUngrabEvent();
 		expect(!next.heard().contains("button "), "no stale release reaches a replacement session");
@@ -424,11 +456,11 @@ int main(int argc, char** argv)
 		expect(s.acceptFrom(&v, path), "the view attaches");
 		v.setKeyCaptureMode(QStringLiteral("on"));
 		QKeyEvent a = key(30, Qt::Key_A, true);
-		v.keyPressEvent(&a);
+		QCoreApplication::sendEvent(&v, &a);
 		QKeyEvent a2 = key(30, Qt::Key_A, true, true);
-		v.keyPressEvent(&a2);
+		QCoreApplication::sendEvent(&v, &a2);
 		QKeyEvent aUp = key(30, Qt::Key_A, false);
-		v.keyReleaseEvent(&aUp);
+		QCoreApplication::sendEvent(&v, &aUp);
 		lines = s.heard();
 		expect(lines.count("key 1 30") == 2, "a press and its repeat are forwarded");
 		expect(lines.count("key 0 30") == 1, "the release is forwarded once");
@@ -503,8 +535,12 @@ int main(int argc, char** argv)
 		QQuickWindow window;
 		TestView v;
 		expect(s.acceptFrom(&v, path), "the view attaches");
+		expect(focusInView(v, window), "the pointer test owns a focused window");
+		v.setSessionProtocol("vnc");
+		s.say("state connected");
+		expect(waitUntil([&] { return v.state() == QLatin1String("connected"); }), "focused capture test session connects");
 		v.setKeyCaptureMode(QStringLiteral("on"));
-		expect(focusInView(v, window), "the view has the keyboard");
+		s.heard(); // discard focus and connection setup notifications
 		QKeyEvent a = key(30, Qt::Key_A, true);
 		v.keyPressEvent(&a);
 		QHoverEvent enter(QEvent::HoverEnter, QPointF(10, 10), QPointF(), QPointF(10, 10));
@@ -515,7 +551,7 @@ int main(int argc, char** argv)
 		expect(lines.count("key 0") == 0 && lines.count("blur") == 0,
 		       "pointer leave lifts nothing in on mode");
 		expect(v.captureState() == QLatin1String("unsupported"),
-		       "a focused asking view without the protocol says unsupported");
+		       "a focused asking view without compositor support says unsupported");
 		QKeyEvent aUp = key(30, Qt::Key_A, false);
 		v.keyReleaseEvent(&aUp);
 		expect(s.heard().count("key 0 30") == 1, "the release goes out after the pointer left");
@@ -582,48 +618,208 @@ int main(int argc, char** argv)
 		       "the end lifts the keys and says blur");
 	}
 
-	// Off is off, and nothing here (no Wayland, no focus) reports the shortcuts held.
-	{
-		Session s;
-		expect(s.start(path), "the stand-in session listens");
-		TestView v;
-		expect(s.acceptFrom(&v, path), "the view attaches");
-		s.say("state connected");
-		expect(waitUntil([&] { return v.state() == QLatin1String("connected"); }),
-		       "the view takes the connected state");
-		v.setKeyCaptureMode(QStringLiteral("off"));
-		expect(v.captureState() == QLatin1String("off"), "off is off");
-		expect(!v.shortcutsCaptured(), "shortcuts are never captured without a compositor");
-		v.setKeyCaptureMode(QStringLiteral("on"));
-		expect(v.captureState() == QLatin1String("ineligible"), "no focus is ineligible");
-		expect(!v.shortcutsCaptured(), "ineligible is not captured");
-	}
-
-	// The release chord's counterpart. Without a compositor nothing is ever captured, so both
-	// release and rearm are no-ops whatever the state says; the latch itself only a live
-	// compositor can leave (releaseShortcuts runs on "active").
+	// Session-local toggles work without compositor support but never claim actual capture.
 	{
 		Session s;
 		expect(s.start(path), "the stand-in session listens");
 		TestView v;
 		QQuickWindow window;
 		expect(s.acceptFrom(&v, path), "the view attaches");
-		v.setKeyCaptureMode(QStringLiteral("on"));
+		v.setSessionProtocol(QStringLiteral("vnc"));
+		s.say("state connected");
+		expect(waitUntil([&] { return v.state() == QLatin1String("connected"); }), "the view is connected");
+		v.setKeyCaptureMode(QStringLiteral("auto"));
 		expect(focusInView(v, window), "the view has the keyboard");
-		expect(v.captureState() == QLatin1String("unsupported"),
-		       "a focused asking view without the protocol says unsupported");
+		expect(v.captureState() == QLatin1String("ineligible"), "VNC Auto starts without a request");
+		expect(v.toggleShortcuts(), "eligible VNC toggle is accepted");
+		expect(v.captureState() == QLatin1String("unsupported") && !v.shortcutsCaptured(),
+		       "VNC request is unsupported without a compositor and never claims active");
+		expect(v.toggleShortcuts(), "eligible toggle remains accepted");
+		expect(v.captureState() == QLatin1String("released"), "second Auto toggle releases pending request");
+		QKeyEvent late = key(48, Qt::Key_B, false);
+		v.keyReleaseEvent(&late);
+		expect(s.heard().count("key 0 48") == 0, "untracked B release is ignored without a prior press");
+		v.toggleShortcuts();
+		expect(v.captureState() == QLatin1String("unsupported"), "third Auto toggle requests again");
+		v.setKeyCaptureMode(QStringLiteral("on"));
+		expect(v.captureState() == QLatin1String("unsupported"), "On follows config as a pending request");
 		v.releaseShortcuts();
-		expect(v.captureState() == QLatin1String("unsupported"),
-		       "release without capture changes nothing");
-		v.rearmShortcuts();
-		expect(v.captureState() == QLatin1String("unsupported"),
-		       "rearm without the release latch changes nothing");
-		QKeyEvent b = key(48, Qt::Key_B, true);
-		v.keyPressEvent(&b);
+		expect(v.captureState() == QLatin1String("released"), "release cancels pending On request");
+		v.releaseShortcuts();
+		expect(v.captureState() == QLatin1String("released"), "release with no request remains Released");
+		v.setKeyCaptureMode(QStringLiteral("auto"));
+		v.toggleShortcuts();
+		expect(v.captureState() == QLatin1String("unsupported"), "Auto can be explicitly requested after release");
+		QQuickWindow otherWindow;
+		otherWindow.show();
+		otherWindow.requestActivate();
+		expect(waitUntil([&] { return otherWindow.isActive() && !window.isActive(); }),
+		       "another window becomes active and deactivates the view window");
+		expect(v.captureState() == QLatin1String("ineligible"), "window deactivation resets transient request");
+		window.requestActivate();
+		expect(waitUntil([&] { return window.isActive() && !otherWindow.isActive(); }),
+		       "the view window is reactivated after the deactivation assertion");
+	}
+	// A pending Auto request consumes the second Escape but still lifts the first remotely held Escape.
+	{
+		Session s;
+		expect(s.start(path), "pending Escape cleanup session listens");
+		TestView v;
+		QQuickWindow window;
+		expect(s.acceptFrom(&v, path), "pending Escape cleanup view attaches");
+		v.setSessionProtocol(QStringLiteral("vnc"));
+		s.say("state connected");
+		expect(waitUntil([&] { return v.state() == QLatin1String("connected"); }), "pending Escape cleanup session connects");
+		v.setKeyCaptureMode(QStringLiteral("auto"));
+		v.setProperty("releaseKey", QStringLiteral("double-escape"));
+		expect(focusInView(v, window), "pending Escape cleanup view focuses");
+		s.heard();
+		v.toggleShortcuts();
+		QKeyEvent first = key(1, Qt::Key_Escape, true, false, Qt::NoModifier, 65307);
+		v.keyPressEvent(&first);
+		expectWire(s.heard(), "key 1 1 65307\n", "first Escape reaches the remote");
+		QKeyEvent firstUp = key(1, Qt::Key_Escape, false);
+		v.keyReleaseEvent(&firstUp);
+		QKeyEvent second = key(1, Qt::Key_Escape, true, false, Qt::NoModifier, 65307);
+		v.keyPressEvent(&second);
+		QKeyEvent secondUp = key(1, Qt::Key_Escape, false);
+		v.keyReleaseEvent(&secondUp);
+		expectWire(s.heard(), "key 0 1\n", "double-Escape lifts the first remote press once");
+		expect(v.captureState() == QLatin1String("released"), "double-Escape cancels pending capture request");
+	}
+	// Gliff reconnect resynchronizes backend focus after connected-state cleanup without focusIn.
+	{
+		Session s;
+		expect(s.start(path), "Gliff reconnect focus session listens");
+		TestView v;
+		QQuickWindow window;
+		expect(s.acceptFrom(&v, path), "Gliff reconnect focus view attaches");
+		v.setSessionProtocol(QStringLiteral("gliff"));
+		s.say("state connected");
+		expect(waitUntil([&] { return v.state() == QLatin1String("connected"); }), "Gliff session connects");
+		expect(focusInView(v, window), "Gliff view focuses");
+		s.heard();
+		s.say("state connecting");
+		expect(waitUntil([&] { return v.state() == QLatin1String("connecting"); }), "Gliff reconnect begins");
+		s.heard();
+		s.say("state connected");
+		expect(waitUntil([&] { return v.state() == QLatin1String("connected"); }), "Gliff reconnect completes");
 		lines = s.heard();
-		expect(lines.count("key 1 48") == 1, "a key still types on the remote");
+		expectWire(lines, "focus 2\n", "focused Gliff canvas restores backend Num Lock focus after reconnect");
 	}
 
+	// Capture intent is distinct from compositor activation; offscreen cannot report active.
+	{
+		Session s;
+		expect(s.start(path), "the stand-in session listens");
+		TestView v;
+		QQuickWindow window;
+		expect(s.acceptFrom(&v, path), "the view attaches");
+		v.setSessionProtocol(QStringLiteral("vnc"));
+		s.say("state connected");
+		expect(waitUntil([&] { return v.state() == QLatin1String("connected"); }), "the view is connected");
+		v.setKeyCaptureMode(QStringLiteral("auto"));
+		expect(focusInView(v, window), "the view has the keyboard");
+		v.toggleShortcuts();
+		v.focusOutEvent(new QFocusEvent(QEvent::FocusOut));
+		expect(v.captureState() == QLatin1String("ineligible"), "focus loss returns to FollowConfig");
+		v.focusInEvent(new QFocusEvent(QEvent::FocusIn));
+		expect(v.captureState() == QLatin1String("ineligible"), "focus return does not auto-request VNC capture");
+		v.toggleShortcuts();
+		mouse(v, QEvent::MouseButtonPress, Qt::LeftButton);
+		s.heard();
+		v.setKeyCaptureMode(QStringLiteral("off"));
+		expect(v.captureState() == QLatin1String("off"), "mode Off disables capture");
+		expect(s.heard().count("button 1 0") == 0 && !v.shortcutsCaptured(),
+		       "mode Off does not cancel the active drag");
+		v.mouseUngrabEvent();
+		expect(s.heard().count("button 1 0") == 1, "actual mouse ungrab releases the drag exactly once");
+		v.setKeyCaptureMode(QStringLiteral("auto"));
+		v.toggleShortcuts();
+		s.say("state connecting");
+		expect(waitUntil([&] { return v.state() == QLatin1String("connecting"); }), "connected to connecting is observed");
+		expect(v.captureState() == QLatin1String("ineligible"), "reconnect transition resets request");
+		s.say("state connected");
+		expect(waitUntil([&] { return v.state() == QLatin1String("connected"); }), "reconnect completes");
+		expect(v.captureState() == QLatin1String("ineligible"), "Auto reconnect does not inherit request");
+		v.setSessionProtocol(QStringLiteral("ssh"));
+		expect(v.captureState() == QLatin1String("off"), "protocol replacement disables capture state");
+		v.setSessionProtocol(QStringLiteral("vnc"));
+		expect(v.captureState() == QLatin1String("ineligible"), "returning to desktop protocol starts at FollowConfig");
+	}
+
+	// On requests follow configuration; a pending request can be cancelled without an active event.
+	{
+		Session s;
+		expect(s.start(path), "the stand-in session listens");
+		TestView v;
+		QQuickWindow window;
+		expect(s.acceptFrom(&v, path), "the view attaches");
+		v.setSessionProtocol(QStringLiteral("vnc"));
+		s.say("state connected");
+		expect(waitUntil([&] { return v.state() == QLatin1String("connected"); }), "On capture session connects");
+		v.setKeyCaptureMode(QStringLiteral("on"));
+		expect(focusInView(v, window), "the view has the keyboard");
+		expect(v.captureState() == QLatin1String("unsupported"), "On requests capture by configuration");
+		v.releaseShortcuts();
+		expect(v.captureState() == QLatin1String("released"), "release cancels pending On request");
+		v.releaseShortcuts();
+		expect(v.captureState() == QLatin1String("released"), "release with no request remains Released");
+		QKeyEvent b = key(48, Qt::Key_B, true);
+		v.keyPressEvent(&b);
+		expect(s.heard().count("key 1 48") == 1, "a key still types on remote after pending release");
+	}
+
+	// Both desktop protocols have Auto toggles and real RdpView key delivery. Offscreen has no compositor.
+	for (const QString& protocol : {QStringLiteral("vnc"), QStringLiteral("rdp")})
+	{
+		Session s;
+		expect(s.start(path), "desktop capture session listens");
+		QQuickWindow window;
+		TestView v;
+		expect(s.acceptFrom(&v, path), "desktop capture view attaches");
+		v.setSessionProtocol(protocol);
+		s.say("state connected");
+		expect(waitUntil([&] { return v.state() == QLatin1String("connected"); }), "desktop session becomes connected");
+		v.setKeyCaptureMode(QStringLiteral("auto"));
+		expect(focusInView(v, window), "desktop canvas receives focus");
+		s.heard();
+		QKeyEvent b = key(48, Qt::Key_B, true, false, Qt::NoModifier, 98);
+		QCoreApplication::sendEvent(&v, &b);
+		QKeyEvent bUp = key(48, Qt::Key_B, false, false, Qt::NoModifier, 98);
+		QCoreApplication::sendEvent(&v, &bUp);
+		expectWire(s.heard(), "key 1 48 98\nkey 0 48\n", "real key press and release reach connected session");
+		expect(v.captureState() == QLatin1String("ineligible"), "desktop Auto starts without capture request");
+		expect(v.toggleShortcuts() && v.captureState() == QLatin1String("unsupported"), "desktop Auto requests capture without compositor");
+		expect(v.toggleShortcuts() && v.captureState() == QLatin1String("released"), "second toggle cancels pending request");
+		expect(v.toggleShortcuts() && v.captureState() == QLatin1String("unsupported"), "third toggle requests again");
+		v.setVisible(false);
+		expect(v.captureState() == QLatin1String("ineligible"), "hide clears the transient capture request");
+		v.setVisible(true);
+		expect(v.captureState() == QLatin1String("ineligible"), "show does not restore transient Auto request");
+	}
+	for (bool endSession : {false, true})
+	{
+		Session s;
+		expect(s.start(path), "capture cleanup session listens");
+		QQuickWindow window;
+		TestView v;
+		expect(s.acceptFrom(&v, path), "capture cleanup view attaches");
+		v.setSessionProtocol(QStringLiteral("rdp"));
+		s.say("state connected");
+		expect(waitUntil([&] { return v.state() == QLatin1String("connected"); }), "capture cleanup session connects");
+		v.setKeyCaptureMode(QStringLiteral("auto"));
+		expect(focusInView(v, window), "capture cleanup view focuses");
+		v.toggleShortcuts();
+		if (endSession)
+		{
+			s.say("state ended 0");
+			expect(waitUntil([&] { return v.state() == QLatin1String("ended"); }), "capture cleanup session ends");
+		}
+		else
+			v.setSocketPath(QString());
+		expect(v.captureState() == QLatin1String("ineligible"), "end or detach clears transient capture request");
+	}
 	if (failures == 0)
 		printf("ok\n");
 	return failures == 0 ? 0 : 1;

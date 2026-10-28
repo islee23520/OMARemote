@@ -210,7 +210,7 @@ chose. The status bar and the keymap sheet show the keys as they are.
 | `ctrl+alt+pgup` / `pgdn` | previous / next tab |
 | `ctrl+alt+end` | send ctrl+alt+del |
 | `ctrl+alt+escape` | release keyboard capture (configured session chord; let compositor shortcuts through) |
-| `ctrl+alt+g` | toggle keyboard capture in RDP, VNC and Gliff when enabled: release while captured, take it back after; passed through in SSH |
+| `ctrl+alt+g` | toggle session-local keyboard capture in an eligible, focused connected RDP, VNC or Gliff canvas; passed through in SSH, prompts and ineligible states |
 | `ctrl+alt+⏎` | fullscreen, as SUPER+F (the Omarchy bar hidden, tabs and pinned list kept) |
 | `ctrl+alt+o` | move the session to its own window (`ctrl+alt+t` there: back into a tab) |
 | `ctrl+alt+w` | disconnect: close the tab (or its own window) |
@@ -340,12 +340,14 @@ already, listed twice or not usable say so. The keymap sheet (`?`) runs them too
 - A connection is built as defaults → group settings → its own values, and stores only what differs
   from what it inherits; settings that come from the group are marked "· group" in the editor.
 
-**Keyboard capture** (RDP, VNC and Gliff): *Auto* keeps the existing Gliff-only behavior; *On*
-captures keys while a desktop tab is focused, including compositor shortcuts, and *Off* disables
-capture. It needs Wayland shortcut-inhibit support. The configured session release chord lets keys reach
-the compositor, and `ctrl+alt+g` toggles capture: release while captured, take it back after. The
-existing extra-release preference applies to captured desktop sessions too. For
-RDP, capture determines whether the separate **Super key** setting can send Super to the remote.
+**Keyboard capture** (RDP, VNC and Gliff): *Auto* keeps Gliff's existing pointer-inside behavior;
+RDP and VNC request capture only when explicitly toggled with `ctrl+alt+g`. *On* follows the
+configured request while the connected desktop canvas owns focus, and *Off* disables capture.
+The toggle acts only for a connected, visible, focused desktop canvas in the active window; a
+repeat does not toggle again. A request is distinct from compositor activation, and the status
+reports `active` only after the compositor's activation event. The configured release chord and
+`ctrl+alt+escape` release a requested or pending capture; neither creates a new request. Capture
+requires Wayland shortcut-inhibit support. For RDP, capture determines whether the separate **Super key** setting can send Super to the remote.
 
 **Input profile and mappings** (RDP, VNC, Gliff): choose Default, Windows, Linux, macOS or Custom
 yourself; the protocol never selects an OS. Default leaves input unchanged. Other profiles do not
@@ -538,9 +540,7 @@ accept ssh from yours, as for an SSH connection.
   there for a GPU driver that misbehaves.
 - **Keys**: your own keyboard layout goes along. While the tab has the keyboard and the pointer is
   on the picture, the tab takes Hyprland's shortcuts, `super` included, as Gliff's own client does.
-  Moving the pointer off gives them back, and so do `ctrl+alt+esc` and `shift+esc` (Settings ›
-  Keyboard: or *Double Esc*, or nothing else); a click takes them again, and so does `ctrl+alt+g`,
-  which takes them back after a release too.
+- **Keyboard** (Gliff): *Auto* follows active focus and pointer containment unless an explicit capture request overrides it. Pointer leave releases Gliff Auto capture; `ctrl+alt+esc` and the configured release key return requested shortcuts, while a new `ctrl+alt+g` request toggles them again.
 - **Clipboard** both ways, text, images and files: nothing moves until you paste, slow pastes show
   their progress with a cancel button, files land in `~/.cache/omaremote/clipboard/`. It is shared
   only while the tab has the keyboard, and never a password manager's selection.
