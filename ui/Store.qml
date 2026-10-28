@@ -60,16 +60,17 @@ Singleton {
         protocol: "rdp", name: "", group: "", host: "", port: 3389,
         username: "", domain: "", savePassword: false, credential: "custom",
         display: "fit", fullscreen: "screen", width: 1920, height: 1080, scale: "auto", multimon: false, // multimon: unused since 0.9.12, kept for older files
-        clipboard: true, audio: "local", microphone: false, homeDrive: false, grabKeyboard: false,
+        clipboard: true, audio: "local", microphone: false, homeDrive: false, grabKeyboard: false, keyCapture: "auto",
+        inputProfile: "default", inputTrigger1: "", inputAction1: "", inputTrigger2: "", inputAction2: "",
         security: "auto", ignoreCert: false, network: "auto",
         gateway: "", gatewayUser: "", gatewayDomain: "", gatewaySavePassword: false, kdc: "",
-        extraArgs: "", openIn: "tab", vncScaling: "fit", vncQuality: "auto", viewOnly: false, unlockAfter: 0, notThisComputer: "", sshArgs: "", sshKey: "", sshReconnect: true, gliffScreen: "mirror", gliffOutput: "", gliffColour: "auto", gliffCapture: "auto", gliffVideo: "auto", gliffServer: "", hotkey: "",
+        extraArgs: "", openIn: "tab", vncScaling: "fit", vncWheelScale: 1, vncQuality: "auto", viewOnly: false, unlockAfter: 0, notThisComputer: "", sshArgs: "", sshKey: "", sshReconnect: true, gliffScreen: "mirror", gliffOutput: "", gliffColour: "auto", gliffCapture: "auto", gliffVideo: "auto", gliffServer: "", hotkey: "",
         favourite: false, lastConnected: 0
     })
     // Settings a group can set (SETTING_KEYS in bin/omaremote-session).
     readonly property var settingKeys: ["display", "fullscreen", "width", "height", "scale", "multimon", "clipboard", "audio",
-        "microphone", "homeDrive", "grabKeyboard", "security", "ignoreCert", "network", "gateway",
-        "gatewayUser", "gatewayDomain", "kdc", "extraArgs", "openIn", "vncScaling", "vncQuality", "viewOnly",
+        "microphone", "homeDrive", "grabKeyboard", "keyCapture", "inputProfile", "inputTrigger1", "inputAction1", "inputTrigger2", "inputAction2", "security", "ignoreCert", "network", "gateway",
+        "gatewayUser", "gatewayDomain", "kdc", "extraArgs", "openIn", "vncScaling", "vncWheelScale", "vncQuality", "viewOnly",
         "unlockAfter"]
     readonly property var resolvedOnly: ["credentialSource", "secretKind", "secretId"]
     // Never exported or synced: LOCAL_KEYS in bin/omaremote-session holds the list, keep in step.

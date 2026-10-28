@@ -20,6 +20,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <map>
 #include <string>
@@ -45,7 +47,15 @@ struct Session
 	bool dirty = false;
 
 	int buttons = 0;                      // RFB button mask
+	int pointerX = 0, pointerY = 0;       // last RFB pointer position
 	std::map<uint32_t, uint32_t> pressed; // evdev code -> keysym sent at press, released the same
+	// Wheel residue: a touchpad sends many small angle deltas where a notched wheel sends
+	// ±120s; RFB has only whole button clicks, so what is left over waits here for the next
+	// event. Per axis and signed, so a direction change spends its residue before scrolling
+	// the other way.
+	// Scale thousandths; residues are angle units in the same fixed-point representation.
+	int wheelScale = 1000;
+	int wheelX = 0, wheelY = 0;
 	std::string remoteClip;
 	std::string localClip;
 	std::string pendingClip; // offered before the connection was up
@@ -297,15 +307,38 @@ static void flush_resize()
 
 // ---------------------------------------------------------------- input
 
-static void send_pointer(int x, int y)
+static void remember_pointer(long x, long y)
 {
-	SendPointerEvent(g.client, std::max(0, x), std::max(0, y), g.buttons);
+	// RFB coordinates are unsigned 16-bit values and must stay within the current desktop.
+	g.pointerX = int(std::clamp(x, 0L, long(std::clamp(g.client->width - 1, 0, 65535))));
+	g.pointerY = int(std::clamp(y, 0L, long(std::clamp(g.client->height - 1, 0, 65535))));
 }
 
-static void click(int mask, int x, int y)
+static void send_pointer(long x, long y)
 {
-	SendPointerEvent(g.client, x, y, g.buttons | mask);
-	SendPointerEvent(g.client, x, y, g.buttons);
+	remember_pointer(x, y);
+	SendPointerEvent(g.client, g.pointerX, g.pointerY, g.buttons);
+}
+
+static void click(int mask, long x, long y)
+{
+	remember_pointer(x, y);
+	SendPointerEvent(g.client, g.pointerX, g.pointerY, g.buttons | mask);
+	SendPointerEvent(g.client, g.pointerX, g.pointerY, g.buttons);
+}
+
+// One wheel click per full notch in the residue: spends as many 120s as it holds and keeps the
+// signed remainder for the next event.
+// Apply a bounded per-connection scale before accumulating full 120-unit RFB wheel notches.
+static void wheel_clicks(int& residue, int delta, int mask, long x, long y)
+{
+	int64_t remaining = int64_t(residue) + int64_t(delta) * g.wheelScale;
+	while (remaining >= 120000 || remaining <= -120000)
+	{
+		click(remaining > 0 ? mask : mask << 1, x, y);
+		remaining += remaining > 0 ? -120000 : 120000;
+	}
+	residue = int(remaining);
 }
 
 static void handle_line(const std::string& line)
@@ -324,7 +357,7 @@ static void handle_line(const std::string& line)
 		flush_resize();
 	}
 	else if (cmd == "mouse" && input)
-		send_pointer(int(num(1)), int(num(2)));
+		send_pointer(num(1), num(2));
 	else if (cmd == "button" && input && w.size() >= 5)
 	{
 		// UI numbering: 1 left, 2 right, 3 middle, 4 back, 5 forward. RFB bits 0 1 2: left middle right.
@@ -336,17 +369,21 @@ static void handle_line(const std::string& line)
 				g.buttons |= masks[b];
 			else
 				g.buttons &= ~masks[b];
-			send_pointer(int(num(3)), int(num(4)));
+			send_pointer(num(3), num(4));
 		}
 	}
 	else if (cmd == "wheel" && input && w.size() >= 5)
 	{
-		const int x = int(num(3)), y = int(num(4));
-		// One button press per notch (120): 4 up, 5 down, 6 left, 7 right.
-		for (long dy = num(1); dy >= 120 || dy <= -120; dy += dy > 0 ? -120 : 120)
-			click(dy > 0 ? 8 : 16, x, y);
-		for (long dx = num(2); dx >= 120 || dx <= -120; dx += dx > 0 ? -120 : 120)
-			click(dx > 0 ? 32 : 64, x, y);
+		const long x = num(3), y = num(4);
+		// One button press per notch (120): 4 up, 5 down, 6 left, 7 right — RFB bits 8/16
+		// vertical, 32/64 horizontal.
+		wheel_clicks(g.wheelY, int(num(1)), 8, x, y);
+		wheel_clicks(g.wheelX, int(num(2)), 32, x, y);
+	}
+	else if (cmd == "blur" && input && g.buttons)
+	{
+		g.buttons = 0;
+		send_pointer(g.pointerX, g.pointerY);
 	}
 	else if (cmd == "key" && input && w.size() >= 3)
 	{
@@ -510,6 +547,11 @@ int main()
 		client->appData.qualityLevel = 7;
 		client->appData.enableJPEG = TRUE;
 	}
+	const std::string wheelScale = g.get("wheelScale", "1");
+	char* scaleEnd = nullptr;
+	double scale = strtod(wheelScale.c_str(), &scaleEnd);
+	if (scaleEnd && *scaleEnd == '\0' && std::isfinite(scale) && scale >= 0.25 && scale <= 8.0)
+		g.wheelScale = int(std::llround(scale * 1000.0));
 
 	client->serverHost = strdup(g.get("host").c_str());
 	client->serverPort = int(strtol(g.get("port", "5900").c_str(), nullptr, 10));
@@ -527,6 +569,7 @@ int main()
 	}
 	g.client = client;
 	g.connected = true;
+	g.wheelX = g.wheelY = 0;
 	if (!g.pendingClip.empty())
 		send_clipboard(g.pendingClip);
 	// The supervisor reads this line as "connected".
@@ -559,6 +602,8 @@ int main()
 	}
 	if (g.quit)
 		rc = 11;
+	g.connected = false;
+	g.wheelX = g.wheelY = 0;
 	log("session ended");
 	g.link.send("state ended " + std::to_string(rc));
 	rfbClientCleanup(client);

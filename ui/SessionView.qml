@@ -15,7 +15,12 @@ Item {
     // Shown in an own window (SessionWindow) instead of a tab.
     property bool inWindow: false
     readonly property var connection: { Store.connections; return session ? Store.get(session.connection) : null }
+    readonly property string resolvedCaptureMode: !session || session.protocol === "ssh" ? "off"
+                                                   : connection ? (connection.keyCapture || "auto") : "auto"
+    readonly property string captureState: view.captureState
     readonly property bool live: !!session && Sessions.isActive(session)
+    readonly property bool canToggleCapture: showDesktop && !hasPrompt && current && !isSsh
+                                            && resolvedCaptureMode !== "off" && view.activeFocus && Window.active
     readonly property bool showDesktop: view.state === "connected" && live
     readonly property var prompt: view.prompt
     readonly property bool hasPrompt: prompt && prompt.kind !== undefined
@@ -106,6 +111,13 @@ Item {
         desktopScale: root.connection && (root.connection.protocol || "rdp") === "rdp" && root.connection.scale !== "auto"
                       ? parseInt(root.connection.scale) : 0
         focus: root.current
+        sessionProtocol: root.session ? root.session.protocol : ""
+        inputProfile: root.connection ? (root.connection.inputProfile || "default") : "default"
+        inputTrigger1: root.connection ? (root.connection.inputTrigger1 || "") : ""
+        inputAction1: root.connection ? (root.connection.inputAction1 || "") : ""
+        inputTrigger2: root.connection ? (root.connection.inputTrigger2 || "") : ""
+        inputAction2: root.connection ? (root.connection.inputAction2 || "") : ""
+        keyCaptureMode: root.resolvedCaptureMode
         captureShortcuts: !!root.session && root.session.protocol === "gliff"
         // The connection's Clipboard switch; SSH always shares (copying a selection, pasting): its
         // switch is for OSC 52, which omaremote-ssh drops itself. Gliff's session process shares
@@ -125,9 +137,12 @@ Item {
         Keys.onPressed: function (event) {
             if (root.hostKey(event, true)) {
                 event.accepted = true
-            } else if (root.chord(event)) {
-                view.releaseAllKeys()
-                event.accepted = true
+            } else {
+                var handled = root.chord(event)
+                if (handled) {
+                    view.releaseAllKeys()
+                    event.accepted = true
+                }
             }
         }
         Keys.onReleased: function (event) {
@@ -260,11 +275,23 @@ Item {
     function chord(event) {
         if (!Keymap.isSessionChord(event, hostHeld))
             return false
+        if (event.key === Qt.Key_G) {
+            if (root.canToggleCapture) {
+                if (event.isAutoRepeat)
+                    return true
+                if (view.toggleShortcuts())
+                    return true
+            }
+            return Keymap.sessionKeys === "rctrl"
+        }
+        if (event.key === Qt.Key_Escape && root.canToggleCapture) {
+            view.releaseShortcuts()
+            return true
+        }
         if (event.key === Qt.Key_Home) root.navigate("home")
         else if (event.key === Qt.Key_PageDown) root.navigate("next")
         else if (event.key === Qt.Key_PageUp) root.navigate("previous")
         else if (event.key === Qt.Key_End && live) view.sendCtrlAltDel()
-        else if (event.key === Qt.Key_Escape && root.session && root.session.protocol === "gliff") view.releaseShortcuts()
         else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && live) root.toggleFullscreen()
         else if (event.key === Qt.Key_K) root.navigate("keys")
         else if (event.key === Qt.Key_N) root.navigate("quick")

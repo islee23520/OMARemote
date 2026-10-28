@@ -209,7 +209,8 @@ chose. The status bar and the keymap sheet show the keys as they are.
 | `ctrl+alt+home` | back to the connections tab |
 | `ctrl+alt+pgup` / `pgdn` | previous / next tab |
 | `ctrl+alt+end` | send ctrl+alt+del |
-| `ctrl+alt+r` | RDP: reconnect, so a locked desktop comes back signed in |
+| `ctrl+alt+escape` | release keyboard capture (configured session chord; let compositor shortcuts through) |
+| `ctrl+alt+g` | toggle session-local keyboard capture in an eligible, focused connected RDP, VNC or Gliff canvas; passed through in SSH, prompts and ineligible states |
 | `ctrl+alt+⏎` | fullscreen, as SUPER+F (the Omarchy bar hidden, tabs and pinned list kept) |
 | `ctrl+alt+o` | move the session to its own window (`ctrl+alt+t` there: back into a tab) |
 | `ctrl+alt+w` | disconnect: close the tab (or its own window) |
@@ -246,6 +247,8 @@ selected and *Connect to …* is one `↑` away. It asks for what it needs (a pa
 saves nothing but the address: quick connections stay on this system (not synced or exported),
 show under *Recent* and *Active*, and `s` saves one as an ordinary connection (`del` forgets it).
 The newest ten are kept.
+
+**VNC wheel sensitivity.** Each VNC connection or group can scale received angle deltas from `0.25×` to `8×` in `0.001×` steps; default `1×` preserves the existing behavior. Configure *Wheel sensitivity* in the connection or group editor. Both axes and signed fractional residue are retained. No macOS detection or pixel-scroll conversion is performed. This change is based on the M3 VNC button-mask release and does not establish that a Mac VNC session's scrolling is fixed.
 
 From a keybinding or script: `omaremote open "Work PC"` shows that connection in OMARemote (its
 running session, or a new one in a tab, starting OMARemote if needed); `omaremote connect "Work PC"`
@@ -337,6 +340,31 @@ already, listed twice or not usable say so. The keymap sheet (`?`) runs them too
 - A connection is built as defaults → group settings → its own values, and stores only what differs
   from what it inherits; settings that come from the group are marked "· group" in the editor.
 
+**Keyboard capture** (RDP, VNC and Gliff): *Auto* keeps Gliff's existing pointer-inside behavior;
+RDP and VNC request capture only when explicitly toggled with `ctrl+alt+g`. *On* follows the
+configured request while the connected desktop canvas owns focus, and *Off* disables capture.
+The toggle acts only for a connected, visible, focused desktop canvas in the active window; a
+repeat does not toggle again. A request is distinct from compositor activation, and the status
+reports `active` only after the compositor's activation event. The configured release chord and
+`ctrl+alt+escape` release a requested or pending capture; neither creates a new request. Capture
+requires Wayland shortcut-inhibit support. For RDP, capture determines whether the separate **Super key** setting can send Super to the remote.
+
+**Input profile and mappings** (RDP, VNC, Gliff): choose Default, Windows, Linux, macOS or Custom
+yourself; the protocol never selects an OS. Default leaves input unchanged. Other profiles do not
+enable a mapping by themselves. Up to two optional mappings can each name a local **evdev** key
+number and an ordered remote action, expressed as decimal `evdev:keysym` pairs joined with `+`.
+Both fields must be filled to enable a mapping; clear both to disable it. For example, `29:65507+57:32`
+describes Ctrl+Space; it is only a suggestion, not a verified macOS shortcut or automatic fallback.
+On the Mac, enable and check the desired shortcut under System Settings → Keyboard → Keyboard
+Shortcuts → Input Sources. Verify the actual locally delivered source key first: CapsLock is not
+assumed, and a local IME or compositor may consume it. RDP/Gliff use the evdev values; VNC uses the
+keysyms and requires compatible server keymaps. `65329` and `65332` are the X Hangul and Hanja
+keysyms. Already-held modifiers stay held; generated keys are paired. SSH remains unchanged.
+RDP mappings reject unsupported scancodes and Super actions: Super delivery is gated by capture
+and the separate Super key setting. Use supported actions rather than an unreported substitution.
+Profiles and mappings travel with connections through duplication, export/import and sync. No
+remote input-source switch, IME behavior or touchpad fix is claimed without a live test.
+
 ## RDP
 
 ### Scaling
@@ -427,6 +455,8 @@ They sign in with a VNC password, or a user name and password for servers that a
   such as TigerVNC, wayvnc and libvncserver-based ones).
 - **Quality**: *Auto* (Tight with JPEG), *High* (lossless ZRLE), *Low* (strong compression).
 - **View only** watches without sending keyboard or mouse input.
+- Held mouse buttons are released on the remote when the session loses focus, so a drag does not
+  stay stuck; moving the pointer off the picture alone does not end the drag.
 - Clipboard text goes both ways (UTF-8 where the server supports it), and the server's cursor is
   drawn locally. Keys are sent as X keysyms, so the server's own keyboard layout applies.
 
@@ -510,8 +540,7 @@ accept ssh from yours, as for an SSH connection.
   there for a GPU driver that misbehaves.
 - **Keys**: your own keyboard layout goes along. While the tab has the keyboard and the pointer is
   on the picture, the tab takes Hyprland's shortcuts, `super` included, as Gliff's own client does.
-  Moving the pointer off gives them back, and so do `ctrl+alt+esc` and `shift+esc` (Settings ›
-  Keyboard: or *Double Esc*, or nothing else); a click takes them again.
+- **Keyboard** (Gliff): *Auto* follows active focus and pointer containment unless an explicit capture request overrides it. Pointer leave releases Gliff Auto capture; `ctrl+alt+esc` and the configured release key return requested shortcuts, while a new `ctrl+alt+g` request toggles them again.
 - **Clipboard** both ways, text, images and files: nothing moves until you paste, slow pastes show
   their progress with a cancel button, files land in `~/.cache/omaremote/clipboard/`. It is shared
   only while the tab has the keyboard, and never a password manager's selection.
