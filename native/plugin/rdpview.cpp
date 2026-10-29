@@ -12,6 +12,7 @@
 #include <QSGTexture>
 
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -31,6 +32,7 @@ RdpView::RdpView(QQuickItem* parent) : QQuickItem(parent)
 	setAcceptedMouseButtons(Qt::AllButtons);
 	setAcceptHoverEvents(true);
 	setActiveFocusOnTab(false);
+	m_inhibit.onActivatedChanged = [this] { onInhibitActivation(); };
 
 	m_attachTimer.setInterval(300);
 	connect(&m_attachTimer, &QTimer::timeout, this, &RdpView::tryAttach);
@@ -111,6 +113,7 @@ void RdpView::tryAttach()
 	m_notifier = new QSocketNotifier(fd, QSocketNotifier::Read, this);
 	connect(m_notifier, &QSocketNotifier::activated, this, &RdpView::onReadable);
 	emit attachedChanged();
+	updateCapture();
 	sendSize();
 	// Gliff pictures straight from the decoder's surfaces, when the scene graph draws with OpenGL
 	// (EGL takes the dmabufs); other sessions ignore the line.
@@ -127,7 +130,7 @@ void RdpView::detach()
 	if (m_fd < 0)
 		return;
 	// A failed send detaches on its own: then there is nothing left to do here.
-	releaseAllKeys();
+	loseKeyboard();
 	if (m_fd < 0)
 		return;
 	delete m_notifier;
@@ -143,7 +146,9 @@ void RdpView::detach()
 	forgetSurfaces();
 	m_showTaken = true;
 	m_drawnSeq = 0;
+	m_captureOverride = CaptureOverride::FollowConfig; // the next session starts without the chord's say-so
 	emit attachedChanged();
+	updateCapture();
 }
 
 void RdpView::send(const QByteArray& line)
@@ -384,6 +389,11 @@ void RdpView::setState(const QString& state, int code)
 		return;
 	m_state = state;
 	m_exitCode = code;
+	if (state == QLatin1String("ended") || state == QLatin1String("failed") || state == QLatin1String("detached"))
+		loseKeyboard();
+	if (state != QLatin1String("connected"))
+		m_captureOverride = CaptureOverride::FollowConfig; // a reconnect starts without the chord's say-so
+	updateCapture();
 	emit stateChanged();
 }
 
@@ -642,6 +652,8 @@ void RdpView::itemChange(ItemChange change, const ItemChangeData& value)
 		scheduleSize();
 	if (change == ItemSceneChange)
 	{
+		if (m_inhibit.held() || m_buttons != Qt::NoButton)
+			loseKeyboard();
 		m_inhibit.release(); // held for the old window
 		if (value.window)
 			connect(value.window, &QWindow::activeChanged, this, &RdpView::updateCapture, Qt::UniqueConnection);
@@ -658,27 +670,153 @@ void RdpView::itemChange(ItemChange change, const ItemChangeData& value)
 	}
 }
 
-// Holds the compositor's shortcuts while this view has the keyboard and is meant to; lets go
-// otherwise. Focus moves between OMARemote's own items (the sidebar, another tab) release them.
-void RdpView::updateCapture()
+// The context a chord or the mode needs, whatever the chord's own latch says: a live session,
+// the keyboard's, and not "off".
+bool RdpView::captureContextEligible() const
 {
-	const bool want = m_captureShortcuts && !m_released && m_pointerInside && hasActiveFocus() && isVisible() &&
-	                  window() && window()->isActive();
-	const bool before = m_inhibit.held();
-	if (want)
-		m_inhibit.inhibit(window());
+	if (m_keyCaptureMode == QLatin1String("off") || m_fd < 0 ||
+	    m_state == QLatin1String("ended") || m_state == QLatin1String("failed"))
+		return false;
+	return hasActiveFocus() && isVisible() && window() && window()->isActive();
+}
+
+// The asking: the context, and the mode's own conditions (the pointer on the picture for "auto")
+// or the chord's request.
+bool RdpView::asksForShortcuts() const
+{
+	if (!captureContextEligible())
+		return false;
+	switch (m_captureOverride)
+	{
+		case CaptureOverride::Released:
+			return false;
+		case CaptureOverride::Requested:
+			return true;
+		case CaptureOverride::FollowConfig:
+			return m_keyCaptureMode == QLatin1String("on") || (m_captureShortcuts && m_pointerInside);
+	}
+	return false;
+}
+
+bool RdpView::captureEligible() const
+{
+	return asksForShortcuts();
+}
+
+QString RdpView::captureState() const
+{
+	return m_captureState;
+}
+
+bool RdpView::shortcutsCaptured() const
+{
+	return m_captureState == QLatin1String("active");
+}
+
+void RdpView::updateCaptureState()
+{
+	QString next;
+	if (m_keyCaptureMode == QLatin1String("off"))
+		next = QStringLiteral("off");
+	else if (!captureEligible())
+		// The chord's release latch alone keeps a still-asking context from the shortcuts;
+		// anything else (focus, hidden, the session gone) is plain ineligibility.
+		next = captureContextEligible() && m_captureOverride == CaptureOverride::Released
+		       ? QStringLiteral("released")
+		       : QStringLiteral("ineligible");
+	else if (!ShortcutInhibit::supported())
+		next = QStringLiteral("unsupported");
 	else
-		m_inhibit.release();
-	if (m_inhibit.held() != before)
+		next = m_inhibit.activated() ? QStringLiteral("active") : QStringLiteral("inactive");
+	if (next == m_captureState)
+		return;
+	const bool before = shortcutsCaptured();
+	m_captureState = next;
+	const bool active = shortcutsCaptured();
+	// Leaving real capture lifts every tracked key here, before the RDP gate closes, so no
+	// key stays pressed on the remote for shortcuts it no longer owns (the release key, a
+	// compositor escape, a mode change). The keyboard itself may still be ours: no blur, and
+	// never a mouse release. The sets are already empty when the transition that caused this
+	// lifted the keys (focus out, hide, the session ending), so nothing is sent twice.
+	if (before && !active)
+		releaseAllKeys();
+	if (before != active && m_sessionProtocol == QLatin1String("rdp"))
+		send(active ? "capture 1" : "capture 0");
+	emit captureStateChanged();
+	if (before != active)
 		emit shortcutsCapturedChanged();
 }
 
+void RdpView::onInhibitActivation()
+{
+	// A compositor re-enable produces another active event; it never overrides our gating.
+	if (m_inhibit.activated() && !captureEligible())
+		m_inhibit.release();
+	updateCaptureState();
+}
+
+void RdpView::updateCapture()
+{
+	const bool held = m_inhibit.held();
+	const bool hadInput = held || !m_pressed.isEmpty() || !m_chords.isEmpty() || m_buttons != Qt::NoButton;
+	if (captureEligible())
+		m_inhibit.inhibit(window());
+	else
+		m_inhibit.release();
+	// The keyboard left with the shortcuts (focus out already ran, or the tab was hidden, the
+	// window deactivated): no release can arrive for keys still held, and the compositor
+	// restored its own shortcuts without a word. The release key and the pointer leaving
+	// ("auto") keep the keyboard; their keys are lifted where those events are handled.
+	if (hadInput && !m_inhibit.held() &&
+	    (!hasActiveFocus() || !isVisible() || !window() || !window()->isActive()))
+		loseKeyboard();
+	updateCaptureState();
+}
+
+void RdpView::loseKeyboard()
+{
+	// Set before sending: a broken socket can recursively detach during cleanup.
+	const bool blur = !m_keyboardBlurred;
+	m_keyboardBlurred = true;
+	releaseAllKeys();
+	// The buttons go with the keyboard: whatever took the window or the grab away leaves no
+	// release to come, and a remote button left down selects or drags by itself.
+	releaseHeldButtons();
+	if (blur)
+		send("blur");
+}
+
+// Release an existing inhibitor request, whether or not the compositor confirmed it active.
+// Without an inhibitor there is nothing to release; unsupported requests remain unsupported.
 void RdpView::releaseShortcuts()
 {
 	if (!m_inhibit.held())
 		return;
-	m_released = true;
+	m_captureOverride = CaptureOverride::Released;
 	updateCapture();
+}
+
+// The shortcuts back after the release key or chord gave them up: the release latch is the
+// only thing keeping a still-asking view from them, so clearing it lets the stored policy
+// ask again. A view not holding the latch — never asked, or a chord request — keeps as it is.
+void RdpView::rearmShortcuts()
+{
+	if (m_captureOverride != CaptureOverride::Released)
+		return;
+	m_captureOverride = CaptureOverride::FollowConfig;
+	updateCapture();
+}
+
+bool RdpView::toggleShortcuts(bool autoRepeat)
+{
+	if (!captureContextEligible())
+		return false;
+	if (autoRepeat)
+		return true;
+	const bool asking = asksForShortcuts() || m_inhibit.held();
+	m_captureOverride = asking ? CaptureOverride::Released : CaptureOverride::Requested;
+	updateCapture();
+	return true;
 }
 
 void RdpView::setCaptureShortcuts(bool capture)
@@ -688,6 +826,33 @@ void RdpView::setCaptureShortcuts(bool capture)
 	m_captureShortcuts = capture;
 	emit captureShortcutsChanged();
 	updateCapture();
+}
+
+void RdpView::setKeyCaptureMode(const QString& mode)
+{
+	const QString normalized = mode == QLatin1String("on") || mode == QLatin1String("off")
+	                               ? mode : QStringLiteral("auto");
+	if (normalized == m_keyCaptureMode)
+		return;
+	m_keyCaptureMode = normalized;
+	// The stored policy changed: the chord's say-so starts over.
+	m_captureOverride = CaptureOverride::FollowConfig;
+	emit keyCaptureModeChanged();
+	updateCapture();
+}
+
+void RdpView::setSessionProtocol(const QString& protocol)
+{
+	if (protocol == m_sessionProtocol)
+		return;
+	if (m_sessionProtocol == QLatin1String("rdp") && shortcutsCaptured())
+		send("capture 0");
+	m_sessionProtocol = protocol;
+	// Another session's protocol: the chord's say-so never carries over.
+	m_captureOverride = CaptureOverride::FollowConfig;
+	if (protocol == QLatin1String("rdp") && shortcutsCaptured())
+		send("capture 1");
+	emit sessionProtocolChanged();
 }
 
 void RdpView::scheduleSize()
@@ -733,16 +898,16 @@ static int buttonNumber(Qt::MouseButton b)
 
 void RdpView::mousePressEvent(QMouseEvent* e)
 {
+	rearmShortcuts();
 	forceActiveFocus(Qt::MouseFocusReason);
-	if (m_released)
-	{
-		m_released = false;
-		updateCapture();
-	}
 	const int b = buttonNumber(e->button());
 	const QPoint p = toRemote(e->position());
 	if (b)
+	{
+		m_buttons |= e->button();
+		m_lastRemotePos = p;
 		send("button " + QByteArray::number(b) + " 1 " + QByteArray::number(p.x()) + ' ' + QByteArray::number(p.y()));
+	}
 	e->accept();
 }
 
@@ -750,16 +915,42 @@ void RdpView::mouseReleaseEvent(QMouseEvent* e)
 {
 	const int b = buttonNumber(e->button());
 	const QPoint p = toRemote(e->position());
-	if (b)
+	if (b && m_buttons.testFlag(e->button()))
+	{
+		m_buttons &= ~e->button();
+		m_lastRemotePos = p;
 		send("button " + QByteArray::number(b) + " 0 " + QByteArray::number(p.x()) + ' ' + QByteArray::number(p.y()));
+	}
 	e->accept();
 }
 
 void RdpView::mouseMoveEvent(QMouseEvent* e)
 {
 	const QPoint p = toRemote(e->position());
+	m_lastRemotePos = p;
 	send("mouse " + QByteArray::number(p.x()) + ' ' + QByteArray::number(p.y()));
 	e->accept();
+}
+
+// A cancelled grab will not deliver the matching release. Crossing the item's edge is not
+// cancellation: Qt's implicit grab keeps an ordinary drag alive outside the picture.
+void RdpView::mouseUngrabEvent()
+{
+	releaseHeldButtons();
+	QQuickItem::mouseUngrabEvent();
+}
+
+// Clear before sending: a dead socket can recursively detach during cleanup. Late physical
+// releases then find no tracked press and cannot double-release into this or a new session.
+void RdpView::releaseHeldButtons()
+{
+	const Qt::MouseButtons held = std::exchange(m_buttons, Qt::MouseButtons());
+	for (Qt::MouseButton b : { Qt::LeftButton, Qt::RightButton, Qt::MiddleButton, Qt::BackButton, Qt::ForwardButton })
+	{
+		if (held.testFlag(b))
+			send("button " + QByteArray::number(buttonNumber(b)) + " 0 " + QByteArray::number(m_lastRemotePos.x()) + ' ' +
+			     QByteArray::number(m_lastRemotePos.y()));
+	}
 }
 
 // The shortcuts follow the pointer, as in Gliff's own client: taken when it comes onto the picture,
@@ -769,6 +960,7 @@ void RdpView::hoverEnterEvent(QHoverEvent* e)
 {
 	QQuickItem::hoverEnterEvent(e);
 	m_pointerInside = true;
+	rearmShortcuts();
 	updateCapture();
 }
 
@@ -776,7 +968,14 @@ void RdpView::hoverLeaveEvent(QHoverEvent* e)
 {
 	QQuickItem::hoverLeaveEvent(e);
 	m_pointerInside = false;
-	m_released = false;
+	// "auto" only: the pointer leaving gives the shortcuts back and lifts the keys held on the
+	// remote (as in Gliff's own client, and without a blur: the keyboard stays). "on" ignores
+	// the pointer: the shortcuts and the keys stay.
+	if (m_keyCaptureMode == QLatin1String("on"))
+	{
+		updateCapture();
+		return;
+	}
 	const bool held = m_inhibit.held();
 	updateCapture();
 	if (held)
@@ -786,6 +985,7 @@ void RdpView::hoverLeaveEvent(QHoverEvent* e)
 void RdpView::hoverMoveEvent(QHoverEvent* e)
 {
 	const QPoint p = toRemote(e->position());
+	m_lastRemotePos = p;
 	send("mouse " + QByteArray::number(p.x()) + ' ' + QByteArray::number(p.y()));
 	e->accept();
 }
@@ -793,6 +993,7 @@ void RdpView::hoverMoveEvent(QHoverEvent* e)
 void RdpView::wheelEvent(QWheelEvent* e)
 {
 	const QPoint p = toRemote(e->position());
+	m_lastRemotePos = p;
 	const QPoint d = e->angleDelta();
 	if (!d.isNull())
 		send("wheel " + QByteArray::number(d.y()) + ' ' + QByteArray::number(d.x()) + ' ' + QByteArray::number(p.x()) +
@@ -801,6 +1002,19 @@ void RdpView::wheelEvent(QWheelEvent* e)
 }
 
 namespace {
+void traceInput(const QKeyEvent* event, bool down)
+{
+	static const bool enabled = [] {
+		const char* value = std::getenv("OMAREMOTE_TRACE_INPUT");
+		return value && std::strcmp(value, "1") == 0;
+	}();
+	if (!enabled || event->nativeScanCode() < 8)
+		return;
+	const quint32 evdev = event->nativeScanCode() - 8;
+	if (evdev == 29 || evdev == 57 || evdev == 58 || evdev == 97 || evdev == 122 || evdev == 123)
+		qInfo("input-trace qt-ingress evdev=%u down=%d repeat=%d", evdev, int(down), int(event->isAutoRepeat()));
+}
+
 // The modifiers a key event can carry without its key having been pressed here: evdev codes of
 // the left and right key, and the left one's keysym. Only Shift and Ctrl are ever added (what a
 // sent shortcut needs); Super is only lifted when it was passed on: without the connection's
@@ -829,10 +1043,25 @@ bool isModifierKey(quint32 evdev)
 			return false;
 	}
 }
+
+bool rdpMappingKeySupported(quint32 key)
+{
+	if (key > 0 && key < 89)
+		return true;
+	switch (key)
+	{
+		case 89: case 92: case 93: case 94: case 96: case 97: case 98: case 99: case 100:
+		case 102: case 103: case 104: case 105: case 106: case 107: case 108: case 109:
+		case 110: case 111: case 113: case 114: case 115: case 117: case 119: case 121:
+		case 122: case 123: case 124: case 127: return true;
+		default: return false;
+	}
+}
 }
 
 void RdpView::keyPressEvent(QKeyEvent* e)
 {
+	traceInput(e, true);
 	// On Wayland (and X11) the native scan code is the XKB keycode: evdev + 8.
 	const quint32 code = e->nativeScanCode();
 	if (code < 8)
@@ -848,11 +1077,18 @@ void RdpView::keyPressEvent(QKeyEvent* e)
 		return;
 	}
 	const quint32 evdev = code - 8;
-	// The release key while the shortcuts are held: they go back to Hyprland. The key itself stays
-	// here; its modifiers already went to the session and go up with their releases. Double Esc:
-	// the first reaches the session, a second within 400 ms releases. (The session keys + Esc
-	// release too: SessionView's chord, through releaseShortcuts.)
-	if (m_inhibit.held() && !e->isAutoRepeat())
+	if (m_stalePressed.contains(evdev))
+	{
+		if (e->isAutoRepeat())
+		{
+			e->accept();
+			return;
+		}
+		m_stalePressed.remove(evdev);
+	}
+	m_keyboardBlurred = false;
+	// Release consumes the key locally and lifts every remote key before returning shortcuts.
+	if (shortcutsCaptured() && !e->isAutoRepeat())
 	{
 		const Qt::KeyboardModifiers mods = e->modifiers() & ~Qt::KeypadModifier;
 		bool release = false;
@@ -866,8 +1102,96 @@ void RdpView::keyPressEvent(QKeyEvent* e)
 		}
 		if (release)
 		{
-			m_released = true;
+			m_captureOverride = CaptureOverride::Released;
 			updateCapture();
+			m_stalePressed.insert(evdev);
+			e->accept();
+			return;
+		}
+	}
+	// Explicit desktop mappings only. An action is an ordered list of evdev:keysym pairs;
+	// keys already held by the user are not ours to press or release.
+	if (m_mappedPressed.contains(evdev))
+	{
+		e->accept();
+		return;
+	}
+	if ((m_sessionProtocol == QLatin1String("vnc") || m_sessionProtocol == QLatin1String("rdp") ||
+	     m_sessionProtocol == QLatin1String("gliff")) &&
+	    (m_inputProfile == QLatin1String("windows") || m_inputProfile == QLatin1String("linux") ||
+	     m_inputProfile == QLatin1String("macos") || m_inputProfile == QLatin1String("custom")))
+	{
+		// Apple Screen Sharing has no Hangul key and no Unicode insert: it turns a keysym
+		// into a virtual key of the current layout. Only an explicit macOS profile, and only
+		// the Hangul/Hanja keys, become the input-source chord. CapsLock is never substituted.
+		const bool macosChord = m_sessionProtocol == QLatin1String("vnc") &&
+		                        m_inputProfile == QLatin1String("macos") && !m_macInputHelper &&
+		                        (evdev == 122 || evdev == 123);
+		const QString triggers[] = {m_inputTrigger1, m_inputTrigger2};
+		const QString actions[] = {m_inputAction1, m_inputAction2};
+		bool userMapped = false;
+		for (const QString& trigger : triggers)
+		{
+			bool parsed = false;
+			userMapped = userMapped || (trigger.toUInt(&parsed) == evdev && parsed);
+		}
+		for (int i = 0; i < 2; ++i)
+		{
+			bool ok = false;
+			const quint32 trigger = triggers[i].toUInt(&ok);
+			const bool synthesize = macosChord && i == 0 && !userMapped;
+			if (!synthesize && (!ok || !trigger || trigger != evdev))
+				continue;
+			if (e->isAutoRepeat() || m_pressed.contains(evdev))
+				continue;
+			QList<QPair<quint32, quint32>> action;
+			QSet<quint32> seen;
+			const auto parts = synthesize
+			                       ? QStringList{QStringLiteral("29:65507"), QStringLiteral("57:32")}
+			                       : actions[i].split(QLatin1Char('+'));
+			if (parts.isEmpty() || parts.size() > 8)
+				continue;
+			bool malformed = false;
+			for (const QString& part : parts)
+			{
+				const auto pair = part.trimmed().split(QLatin1Char(':'));
+				bool keyOk = false, symOk = false;
+				const quint32 key = pair.value(0).toUInt(&keyOk);
+				const quint32 sym = pair.value(1).toUInt(&symOk);
+				if (pair.size() != 2 || !keyOk || !symOk || !key || key > 767 || !sym || seen.contains(key) ||
+				    (m_sessionProtocol == QLatin1String("rdp") && !rdpMappingKeySupported(key)))
+				{
+					malformed = true;
+					break;
+				}
+				seen.insert(key);
+				action.append({key, sym});
+			}
+			if (malformed || action.isEmpty())
+				continue;
+			m_mappedPressed.insert(evdev);
+			QList<quint32> owned;
+			for (const auto& item : action)
+			{
+				const quint32 key = item.first;
+				const quint32 other = key == 29 ? 97 : key == 97 ? 29 : key == 42 ? 54 : key == 54 ? 42 :
+				                      key == 125 ? 126 : key == 126 ? 125 : 0;
+				bool held = m_pressed.contains(key) || (other && m_pressed.contains(other));
+				if (m_sessionProtocol == QLatin1String("vnc"))
+					for (auto it = m_pressedKeysyms.cbegin(); it != m_pressedKeysyms.cend(); ++it)
+						held = held || it.value() == item.second;
+				for (const Chord& chord : m_chords)
+					for (const auto& added : chord.added)
+						held = held || added.first == key || (other && added.first == other) ||
+						       (m_sessionProtocol == QLatin1String("vnc") && added.second == item.second);
+				if (held)
+					continue;
+				send("key 1 " + QByteArray::number(item.first) + ' ' + QByteArray::number(item.second));
+				owned.append(item.first);
+			}
+			// Release the last key first so Control is still down when Space goes up.
+			for (auto it = owned.crbegin(); it != owned.crend(); ++it)
+				send("key 0 " + QByteArray::number(*it));
 			e->accept();
 			return;
 		}
@@ -885,7 +1209,9 @@ void RdpView::keyPressEvent(QKeyEvent* e)
 		for (const ModifierKey& m : kModifierKeys)
 		{
 			const bool held = m_pressed.contains(m.left) || m_pressed.contains(m.right);
-			if ((mods & m.mod) && !held && m.add)
+			if ((mods & m.mod) && !held && m.add &&
+			    !m_stalePressed.contains(m.left) && !m_stalePressed.contains(m.right) &&
+			    !m_mappedPressed.contains(m.left) && !m_mappedPressed.contains(m.right))
 			{
 				send("key 1 " + QByteArray::number(m.left) + ' ' + QByteArray::number(m.keysym));
 				chord.added.append({m.left, m.keysym});
@@ -908,7 +1234,13 @@ void RdpView::keyPressEvent(QKeyEvent* e)
 	m_pressed.insert(evdev);
 	// RDP sends the scancode; VNC needs the keysym, which on Wayland and X11 is the native virtual key;
 	// SSH types the text the layout made of it (dead keys included).
-	QByteArray line = "key 1 " + QByteArray::number(evdev) + ' ' + QByteArray::number(e->nativeVirtualKey());
+	quint32 keysym = e->nativeVirtualKey();
+	// caps:none can leave CapsLock with no keysym (0xffffff or 0). Recover the real key
+	// from its evdev code for VNC; leave untabled keys and valid layout keysyms unchanged.
+	if ((keysym == 0xffffff || keysym == 0) && evdev == 58)
+		keysym = 0xffe5; // XK_Caps_Lock
+	m_pressedKeysyms.insert(evdev, keysym);
+	QByteArray line = "key 1 " + QByteArray::number(evdev) + ' ' + QByteArray::number(keysym);
 	if (!e->text().isEmpty())
 		line += ' ' + e->text().toUtf8().toBase64();
 	send(line);
@@ -917,6 +1249,7 @@ void RdpView::keyPressEvent(QKeyEvent* e)
 
 void RdpView::keyReleaseEvent(QKeyEvent* e)
 {
+	traceInput(e, false);
 	if (e->isAutoRepeat())
 	{
 		e->accept();
@@ -929,8 +1262,19 @@ void RdpView::keyReleaseEvent(QKeyEvent* e)
 		return;
 	}
 	const quint32 evdev = code - 8;
-	m_pressed.remove(evdev);
-	send("key 0 " + QByteArray::number(evdev));
+	if (m_stalePressed.remove(evdev))
+	{
+		e->accept();
+		return;
+	}
+	if (m_mappedPressed.remove(evdev))
+	{
+		e->accept();
+		return;
+	}
+	m_pressedKeysyms.remove(evdev);
+	if (m_pressed.remove(evdev))
+		send("key 0 " + QByteArray::number(evdev));
 	// Undo what was done around it: the added modifiers go up.
 	const auto chord = m_chords.find(evdev);
 	if (chord != m_chords.end())
@@ -949,17 +1293,27 @@ void RdpView::releaseAllKeys()
 	// Taken off the list first: a send to a session that just ended detaches, and detaching
 	// releases the keys again (the Enter of an SSH "exit" is still held when the session ends).
 	const QSet<quint32> keys = std::exchange(m_pressed, {});
+	m_pressedKeysyms.clear();
 	const auto chords = std::exchange(m_chords, {});
-	for (quint32 evdev : keys)
-		send("key 0 " + QByteArray::number(evdev));
+	m_stalePressed.unite(keys);
+	m_stalePressed.unite(std::exchange(m_mappedPressed, {}));
+	QSet<quint32> releases = keys;
 	for (const Chord& chord : chords)
-		for (const auto& [k, sym] : chord.added)
-			send("key 0 " + QByteArray::number(k));
+	{
+		for (const auto& key : chord.lifted)
+			releases.remove(key.first); // already lifted for the synthetic chord
+		for (const auto& key : chord.added)
+			releases.insert(key.first);
+	}
+	for (quint32 evdev : releases)
+		send("key 0 " + QByteArray::number(evdev));
 }
 
 void RdpView::focusInEvent(QFocusEvent* e)
 {
 	QQuickItem::focusInEvent(e);
+	m_keyboardBlurred = false;
+	rearmShortcuts();
 	updateCapture();
 	// Bring the remote toggle keys in line with ours; Qt has no lock-state query, so Num Lock on
 	// and the rest off is the common case, and the keys themselves still toggle normally.
@@ -1006,8 +1360,7 @@ void RdpView::cancelReconnect()
 void RdpView::focusOutEvent(QFocusEvent* e)
 {
 	QQuickItem::focusOutEvent(e);
-	send("blur");
-	releaseAllKeys();
+	loseKeyboard();
 	updateCapture();
 }
 

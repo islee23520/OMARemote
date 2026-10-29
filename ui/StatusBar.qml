@@ -15,6 +15,8 @@ Rectangle {
     // The facts after the reason, which Format.statsParts puts first.
     readonly property var statsParts: Format.statsParts(stats).slice(statsReason ? 1 : 0)
     property bool statsOpen: false
+    property string captureState: ""
+    readonly property bool showCapture: ["active", "inactive", "released", "ineligible", "unsupported"].indexOf(captureState) >= 0
     onShowStatsChanged: if (!showStats) statsOpen = false
     readonly property color statsColor: !stats ? Theme.muted : stats.health === "bad" ? Theme.urgent
                                         : stats.health === "warn" ? Theme.warning : Theme.success
@@ -93,6 +95,22 @@ Rectangle {
                 textFormat: Text.PlainText
                 text: Sessions.activeCount + " active"
                 color: Theme.success
+                font.family: Theme.font
+                font.pixelSize: Theme.caption
+            }
+        }
+        Item {
+            visible: root.showCapture
+            width: captureText.implicitWidth
+            height: captureText.implicitHeight
+            Text {
+                id: captureText
+                textFormat: Text.PlainText
+                text: root.captureState === "active" ? "⌨ captured"
+                    : root.captureState === "inactive" ? "⌨ idle"
+                    : root.captureState === "released" ? "⌨ released"
+                    : root.captureState === "unsupported" ? "⌨ unsupported" : "⌨ unavailable"
+                color: root.captureState === "active" ? Theme.accent : Theme.muted
                 font.family: Theme.font
                 font.pixelSize: Theme.caption
             }

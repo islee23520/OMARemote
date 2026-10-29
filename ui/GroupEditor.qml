@@ -325,6 +325,15 @@ Rectangle {
                     Segment { value: root.boolValue("grabKeyboard"); options: root.onOff; onPicked: function (v) { root.setBool("grabKeyboard", v) } }
                 }
                 FormRow {
+                    label: "Keyboard capture"
+                    help: "Focused desktop consumes keys, including compositor shortcuts. Requires Wayland shortcut-inhibit support; " + Keymap.session("ctrl+alt+escape") + " releases capture and " + Keymap.session("ctrl+alt+g") + " toggles it. For RDP this affects Super key delivery."
+                    Segment {
+                        value: root.value("keyCapture")
+                        options: root.notSet.concat([{ value: "auto", label: "Auto" }, { value: "on", label: "On" }, { value: "off", label: "Off" }])
+                        onPicked: function (v) { root.set("keyCapture", v) }
+                    }
+                }
+                FormRow {
                     label: "Unlock on return"
                     help: "Reconnect when back after"
                     Segment {
@@ -351,6 +360,22 @@ Rectangle {
                         value: root.value("vncQuality")
                         options: root.notSet.concat([{ value: "auto", label: "Auto" }, { value: "high", label: "High" }, { value: "low", label: "Low" }])
                         onPicked: function (v) { root.set("vncQuality", v) }
+                    }
+                }
+                FormRow {
+                    label: "Wheel sensitivity"
+                    help: "Multiplier 0.25–8; leave unset to inherit."
+                    Input {
+                        maximumLength: Limits.size
+                        placeholderText: "unset"
+                        text: root.value("vncWheelScale")
+                        onTextEdited: {
+                            var n = Number(text)
+                            if (text.trim() === "")
+                                root.set("vncWheelScale", "")
+                            else if (isFinite(n) && n >= 0.25 && n <= 8)
+                                root.set("vncWheelScale", n)
+                        }
                     }
                 }
                 FormRow {

@@ -44,6 +44,30 @@ zwp_keyboard_shortcuts_inhibit_manager_v1* manager(wl_display* display)
 
 } // namespace
 
+bool ShortcutInhibit::supported()
+{
+	auto* app = qGuiApp->nativeInterface<QNativeInterface::QWaylandApplication>();
+	if (!app)
+		return false;
+	return manager(app->display()) != nullptr;
+}
+
+void ShortcutInhibit::activatedEvent(void* data, zwp_keyboard_shortcuts_inhibitor_v1*)
+{
+	auto* self = static_cast<ShortcutInhibit*>(data);
+	self->m_activated = true;
+	if (self->onActivatedChanged)
+		self->onActivatedChanged();
+}
+
+void ShortcutInhibit::deactivatedEvent(void* data, zwp_keyboard_shortcuts_inhibitor_v1*)
+{
+	auto* self = static_cast<ShortcutInhibit*>(data);
+	self->m_activated = false;
+	if (self->onActivatedChanged)
+		self->onActivatedChanged();
+}
+
 bool ShortcutInhibit::inhibit(QWindow* window)
 {
 	if (m_inhibitor && m_window == window)
@@ -59,13 +83,23 @@ bool ShortcutInhibit::inhibit(QWindow* window)
 	if (!surface || !seat || !m)
 		return false;
 	m_inhibitor = zwp_keyboard_shortcuts_inhibit_manager_v1_inhibit_shortcuts(m, surface, seat);
+	if (!m_inhibitor)
+		return false;
 	m_window = window;
+	// The manager sits on Qt's own queue, so the inhibitor does too and its `active`/
+	// `inactive` arrive with Qt's event loop, on the GUI thread.
+	static const zwp_keyboard_shortcuts_inhibitor_v1_listener listener = {
+		/* .active   */ activatedEvent,
+		/* .inactive */ deactivatedEvent,
+	};
+	zwp_keyboard_shortcuts_inhibitor_v1_add_listener(m_inhibitor, &listener, this);
 	wl_display_flush(app->display());
-	return m_inhibitor != nullptr;
+	return true;
 }
 
 void ShortcutInhibit::release()
 {
+	m_activated = false;
 	if (!m_inhibitor)
 		return;
 	zwp_keyboard_shortcuts_inhibitor_v1_destroy(m_inhibitor);

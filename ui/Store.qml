@@ -60,7 +60,9 @@ Singleton {
         protocol: "rdp", name: "", group: "", host: "", port: 3389,
         username: "", domain: "", savePassword: false, credential: "custom",
         display: "fit", fullscreen: "screen", width: 1920, height: 1080, scale: "auto", multimon: false, // multimon: unused since 0.9.12, kept for older files
-        clipboard: true, audio: "local", microphone: false, homeDrive: false, grabKeyboard: false,
+        clipboard: true, audio: "local", microphone: false, homeDrive: false, grabKeyboard: false, keyCapture: "auto",
+        inputProfile: "default", inputTrigger1: "", inputAction1: "", inputTrigger2: "", inputAction2: "",
+        vncMacInputHost: "",
         security: "auto", ignoreCert: false, network: "auto",
         gateway: "", gatewayUser: "", gatewayDomain: "", gatewaySavePassword: false, kdc: "",
         extraArgs: "", openIn: "tab", vncScaling: "fit", vncQuality: "auto", viewOnly: false, unlockAfter: 0, notThisComputer: "", sshArgs: "", sshKey: "", sshReconnect: true, gliffScreen: "mirror", gliffOutput: "", gliffColour: "auto", gliffCapture: "auto", gliffVideo: "auto", gliffServer: "", hotkey: "",
@@ -68,14 +70,14 @@ Singleton {
     })
     // Settings a group can set (SETTING_KEYS in bin/omaremote-session).
     readonly property var settingKeys: ["display", "fullscreen", "width", "height", "scale", "multimon", "clipboard", "audio",
-        "microphone", "homeDrive", "grabKeyboard", "security", "ignoreCert", "network", "gateway",
+        "microphone", "homeDrive", "grabKeyboard", "keyCapture", "inputProfile", "inputTrigger1", "inputAction1", "inputTrigger2", "inputAction2", "security", "ignoreCert", "network", "gateway",
         "gatewayUser", "gatewayDomain", "kdc", "extraArgs", "openIn", "vncScaling", "vncQuality", "viewOnly",
         "unlockAfter"]
     readonly property var resolvedOnly: ["credentialSource", "secretKind", "secretId"]
     // Never exported or synced: LOCAL_KEYS in bin/omaremote-session holds the list, keep in step.
     readonly property var localKeys: ["username", "domain", "credential", "savePassword", "gatewayUser",
         "gatewayDomain", "gatewaySavePassword", "extraArgs", "sshArgs", "sshKey", "lastConnected", "hotkey",
-        "ignoreCert", "security", "gliffServer", "unlockAfter", "notThisComputer"]
+        "ignoreCert", "security", "gliffServer", "unlockAfter", "notThisComputer", "vncMacInputHost"]
 
     // Every connection as it will be used: defaults, then its group, then its own values.
     readonly property var connections: stored.map(function (c) { return root.resolve(c) })

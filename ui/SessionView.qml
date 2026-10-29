@@ -15,6 +15,9 @@ Item {
     // Shown in an own window (SessionWindow) instead of a tab.
     property bool inWindow: false
     readonly property var connection: { Store.connections; return session ? Store.get(session.connection) : null }
+    readonly property string resolvedCaptureMode: !session || session.protocol === "ssh" ? "off"
+                                                   : connection ? (connection.keyCapture || "auto") : "auto"
+    readonly property string captureState: view.captureState
     readonly property bool live: !!session && Sessions.isActive(session)
     readonly property bool showDesktop: view.state === "connected" && live
     readonly property var prompt: view.prompt
@@ -106,6 +109,14 @@ Item {
         desktopScale: root.connection && (root.connection.protocol || "rdp") === "rdp" && root.connection.scale !== "auto"
                       ? parseInt(root.connection.scale) : 0
         focus: root.current
+        sessionProtocol: root.session ? root.session.protocol : ""
+        inputProfile: root.connection ? (root.connection.inputProfile || "default") : "default"
+        macInputHelper: !!root.connection && !!root.connection.vncMacInputHost
+        inputTrigger1: root.connection ? (root.connection.inputTrigger1 || "") : ""
+        inputAction1: root.connection ? (root.connection.inputAction1 || "") : ""
+        inputTrigger2: root.connection ? (root.connection.inputTrigger2 || "") : ""
+        inputAction2: root.connection ? (root.connection.inputAction2 || "") : ""
+        keyCaptureMode: root.resolvedCaptureMode
         captureShortcuts: !!root.session && root.session.protocol === "gliff"
         // The connection's Clipboard switch; SSH always shares (copying a selection, pasting): its
         // switch is for OSC 52, which omaremote-ssh drops itself. Gliff's session process shares
@@ -264,7 +275,10 @@ Item {
         else if (event.key === Qt.Key_PageDown) root.navigate("next")
         else if (event.key === Qt.Key_PageUp) root.navigate("previous")
         else if (event.key === Qt.Key_End && live) view.sendCtrlAltDel()
-        else if (event.key === Qt.Key_Escape && root.session && root.session.protocol === "gliff") view.releaseShortcuts()
+        else if (event.key === Qt.Key_Escape && view.shortcutsCaptured) view.releaseShortcuts()
+        // One chord both ways: release while captured (or asked), ask otherwise — an "auto"
+        // RDP/VNC session's way in. A false (off, no session) leaves G unmatched, for the remote.
+        else if (event.key === Qt.Key_G) return view.toggleShortcuts(event.isAutoRepeat)
         else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && live) root.toggleFullscreen()
         else if (event.key === Qt.Key_K) root.navigate("keys")
         else if (event.key === Qt.Key_N) root.navigate("quick")

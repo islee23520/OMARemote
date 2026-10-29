@@ -405,19 +405,19 @@ FocusScope {
                             }
                         }
 
-                        Heading { visible: root.section === "keyboard"; text: "GLIFF" }
+                        Heading { visible: root.section === "keyboard"; text: "RELEASE KEYS" }
                         Note {
                             visible: root.section === "keyboard"
-                            text: "A Gliff tab takes Hyprland's shortcuts while it has the keyboard and the pointer is "
-                                + "on the picture, Super included, as Gliff's own client does; moving the pointer off "
-                                + "the picture gives them back. " + Keymap.cap("ctrl+alt+escape") + " gives them back "
-                                + "while it stays there, and so does the key below, until the pointer leaves or you "
-                                + "click the picture. Double Esc: the first Esc still reaches the remote, a quick "
-                                + "second gives them back."
+                            text: "Focused RDP, VNC and Gliff desktops can capture keys, including compositor shortcuts. "
+                                + "Capture requires Wayland shortcut-inhibit support. " + Keymap.cap("ctrl+alt+escape")
+                                + " releases capture, and " + Keymap.cap("ctrl+alt+g") + " toggles it: release while captured, "
+                                + "take it back after. Session keys changes those chords. For RDP it determines whether "
+                                + "Super key delivery is effective."
                         }
                         FormRow {
                             visible: root.section === "keyboard"
-                            label: "Also on"
+                            label: "Extra release"
+                            help: "Also release keyboard capture using Shift+Esc, Double Esc or none"
                             Segment {
                                 value: ["double-escape", "none"].indexOf(Store.ui.gliffReleaseKey) >= 0 ? Store.ui.gliffReleaseKey : "shift+escape"
                                 options: [{ value: "shift+escape", label: "Shift+Esc" }, { value: "double-escape", label: "Double Esc" },

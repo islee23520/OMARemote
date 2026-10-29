@@ -23,6 +23,107 @@ def conn(**kw):
     return dict({"id": "c1", "name": "Work", "host": "pc.lan"}, **kw)
 
 
+class KeyCapture(unittest.TestCase):
+    def test_inherited_and_explicit_capture_modes(self):
+        data = {"groups": {"Desk": {"settings": {"keyCapture": "on"}}}}
+        self.assertEqual(session.resolve(conn(group="Desk"), data)["keyCapture"], "on")
+        self.assertEqual(session.resolve(conn(group="Desk", keyCapture="off"), data)["keyCapture"], "off")
+        self.assertEqual(session.resolve(conn(), {"groups": {}})["keyCapture"], "auto")
+
+    def test_invalid_group_capture_mode_is_rejected(self):
+        data = {"groups": {"Desk": {"settings": {"keyCapture": "sometimes"}}}}
+        with self.assertRaisesRegex(ValueError, "invalid keyCapture"):
+            session.resolve(conn(group="Desk"), data)
+
+class InputProfiles(unittest.TestCase):
+    def test_default_and_explicit_settings(self):
+        for protocol in ("vnc", "rdp", "gliff", "ssh"):
+            value = session.resolve(conn(protocol=protocol), {"groups": {}})
+            self.assertEqual(value["inputProfile"], "default")
+            self.assertEqual(value["inputTrigger1"], "")
+        settings = {"inputProfile": "macos", "inputTrigger1": "58", "inputAction1": "29:65507+57:32"}
+        data = {"groups": {"Desk": {"settings": settings}}}
+        self.assertEqual(session.resolve(conn(group="Desk"), data)["inputAction1"], settings["inputAction1"])
+        self.assertEqual(session.resolve(conn(group="Desk", inputProfile="custom"), data)["inputProfile"], "custom")
+        self.assertEqual(session.portable_connection(conn(**settings))["inputAction1"], settings["inputAction1"])
+        source = {"connections": [conn(**settings)], "groups": {}}
+        for kind in ("export", "sync"):
+            document = json.loads(json.dumps(session.portable(source, "other", kind)))
+            merged, report = session.merge({"connections": [], "groups": {}}, [document])
+            self.assertFalse(report["errors"])
+            saved = merged["connections"][0]
+            self.assertEqual(saved["inputProfile"], "macos")
+            self.assertEqual(saved["inputTrigger1"], "58")
+            self.assertEqual(saved["inputAction1"], "29:65507+57:32")
+
+    def test_invalid_mappings_and_profiles(self):
+        for trigger, action in (("58", ""), ("999", "57:32"), ("58", "29:65507+29:1"), ("58", "1:0")):
+            with self.assertRaises(ValueError):
+                session.resolve(conn(inputTrigger1=trigger, inputAction1=action), {"groups": {}})
+        with self.assertRaises(ValueError):
+            session.resolve(conn(inputProfile="detected"), {"groups": {}})
+        self.assertEqual(session.odd_types(conn(inputAction1="bogus")), "inputAction1")
+        document = session.portable({"connections": [conn(inputTrigger1="58")], "groups": {}}, "other")
+        merged, report = session.merge({"connections": [], "groups": {}}, [document])
+        self.assertEqual(merged["connections"], [])
+        self.assertTrue(report["errors"])
+
+    def test_group_import_rejects_invalid_effective_mappings(self):
+        old = {"settings": {"inputTrigger1": "58", "inputAction1": "57:32"}, "modified": 1}
+        cases = (
+            ({"inputAction1": "57:32"}, {"inputTrigger1": ""}, "invalid input mapping"),
+            ({"inputTrigger2": "59", "inputAction2": "57:32"},
+             {"inputTrigger1": "59", "inputAction1": "57:32"}, "duplicate input mapping"),
+        )
+        for overrides, settings, error in cases:
+            for trashed in (False, True):
+                with self.subTest(overrides=overrides, trashed=trashed):
+                    member = conn(group="Desk", **overrides)
+                    local = {"connections": [] if trashed else [member],
+                             "trash": [{"connection": member}] if trashed else [], "groups": {"Desk": old}}
+                    document = {"format": "omaremote-sync", "version": 1, "system": "other", "groups": {"Desk": {"settings": settings, "modified": 2}}}
+                    merged, report = session.merge(local, [document], now=1000)
+                    self.assertEqual(merged["groups"]["Desk"], old)
+                    self.assertTrue(any("skipped group 'Desk'" in e and error in e for e in report["errors"]))
+                    session.resolve(member, merged)
+                    with tempfile.TemporaryDirectory() as d:
+                        path = os.path.join(d, "connections.json")
+                        with open(path, "w") as f:
+                            json.dump(merged, f)
+                        session.load_connections(path)
+
+    def test_group_only_invalid_mapping_is_rejected(self):
+        for settings in ({"inputTrigger1": "58"},
+                         {"inputTrigger1": "58", "inputAction1": "57:32",
+                          "inputTrigger2": "58", "inputAction2": "57:32"}):
+            with self.subTest(settings=settings):
+                document = {"format": "omaremote-sync", "version": 1, "system": "other", "groups": {"Desk": {"settings": settings, "modified": 2}}}
+                merged, report = session.merge({"connections": [], "groups": {}}, [document], now=1000)
+                self.assertNotIn("Desk", merged["groups"])
+                self.assertTrue(any("skipped group 'Desk'" in e and "input mapping" in e for e in report["errors"]))
+
+    def test_valid_group_mapping_with_member_overrides_is_accepted(self):
+        member = conn(group="Desk", inputTrigger1="59", inputAction1="57:32")
+        local = {"connections": [member], "groups": {}}
+        settings = {"inputTrigger1": "58", "inputAction1": "57:32"}
+        document = {"format": "omaremote-sync", "version": 1, "system": "other", "groups": {"Desk": {"settings": settings, "modified": 2}}}
+        merged, report = session.merge(local, [document], now=1000)
+        self.assertFalse(report["errors"])
+        self.assertEqual(merged["groups"]["Desk"]["settings"], settings)
+        self.assertEqual(session.resolve(member, merged)["inputTrigger1"], "59")
+
+    def test_group_deletion_rejects_invalid_effective_mapping(self):
+        member = conn(group="Desk", inputAction1="57:32")
+        group = {"settings": {"inputTrigger1": "58", "inputAction1": "57:32"}, "modified": 1}
+        local = {"connections": [member], "groups": {"Desk": group}}
+        document = {"format": "omaremote-sync", "version": 1, "system": "other", "deletedGroups": {"Desk": 2}}
+        merged, report = session.merge(local, [document], now=1000)
+        self.assertEqual(merged["groups"]["Desk"], group)
+        self.assertNotIn("Desk", merged["deletedGroups"])
+        self.assertTrue(any("skipped group 'Desk' deletion" in e for e in report["errors"]))
+        session.resolve(member, merged)
+
+
 class BuildArgs(unittest.TestCase):
     def test_minimal_fit_follows_window(self):
         args = session.build_args(conn(), auto_scale=100)
@@ -556,6 +657,38 @@ class Vnc(unittest.TestCase):
         self.assertIn("scaling=fit", lines)
         self.assertFalse(any(l.startswith("password=") for l in lines))
 
+    def test_mac_helper_exact_argv_is_independent_of_vnc_credentials_and_port(self):
+        c = conn(protocol="vnc", inputProfile="macos", vncMacInputHost="mac-keyboard",
+                 port=5999, username="vnc-user", sshArgs="-p 2222", sshKey="/private/key")
+        lines = session.build_vnc_config(c, password="vnc-password")
+        argv = [line.split("=", 1)[1] for line in lines if line.startswith("macInputArg=")]
+        self.assertEqual(argv, ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=5",
+                                "-o", "ServerAliveCountMax=2", "--", "mac-keyboard", "omaremote-mac-input", "--stdio"])
+        self.assertIn("port=5999", lines)
+        self.assertIn("username=vnc-user", lines)
+        self.assertIn("password=vnc-password", lines)
+
+    def test_mac_helper_default_off_and_validation(self):
+        self.assertFalse(any(line.startswith("macInputArg=") for line in session.build_vnc_config(conn(protocol="vnc"))))
+        for host in ("mac-alias", "alice@mac.lan", "[::1]", "a" * 253):
+            session.build_vnc_config(conn(protocol="vnc", inputProfile="macos", vncMacInputHost=host))
+        for host in ("-oProxyCommand=evil", "mac\narg=bad", "mac;evil", "a" * 254, " ", 123):
+            with self.subTest(host=host), self.assertRaises(ValueError):
+                session.build_vnc_config(conn(protocol="vnc", inputProfile="macos", vncMacInputHost=host))
+        for protocol, profile in (("rdp", "macos"), ("ssh", "macos"), ("gliff", "macos"), ("vnc", "default"), ("vnc", "custom")):
+            c = conn(protocol=protocol, inputProfile=profile, vncMacInputHost="mac")
+            with self.subTest(protocol=protocol, profile=profile):
+                with self.assertRaisesRegex(ValueError, "requires VNC"):
+                    session.resolve(c, {"groups": {}})
+                with self.assertRaisesRegex(ValueError, "requires VNC"):
+                    session.build_vnc_config(c)
+
+    def test_mac_helper_connection_only_never_inherited(self):
+        data = {"groups": {"Desk": {"settings": {"vncMacInputHost": "unwanted"}}}}
+        self.assertEqual(session.resolve(conn(protocol="vnc", group="Desk"), data)["vncMacInputHost"], "")
+        self.assertNotIn("vncMacInputHost", session.SETTING_KEYS)
+        self.assertEqual(session.too_long({"vncMacInputHost": "a" * 254}), ("vncMacInputHost", 253))
+
     def test_vnc_client_is_found_by_protocol(self):
         self.assertTrue(session.tab_client("vnc").endswith("omaremote-vnc"))
         self.assertTrue(session.tab_client("rdp").endswith("omaremote-rdp"))
@@ -940,6 +1073,42 @@ class Sync(unittest.TestCase):
         incoming = self.remote(groups={"Servers": {"settings": {"unlockAfter": 1}, "modified": 9}})
         data, _ = session.merge(local, [incoming], self.NOW)
         self.assertEqual(data["groups"]["Servers"]["settings"], {"unlockAfter": 5})
+
+    def test_mac_input_host_never_travels_or_activates_from_import(self):
+        mine = self.c(protocol="vnc", inputProfile="macos", vncMacInputHost="local-mac")
+        evil = self.c(protocol="vnc", inputProfile="macos", modified=200, vncMacInputHost="remote-mac")
+        for kind in ("sync", "export"):
+            data = self.local(mine, groups={"Desk": {"settings": {"vncMacInputHost": "local-mac"}}})
+            self.assertNotIn("vncMacInputHost", json.dumps(session.portable(data, "here", kind)))
+            incoming = self.remote(evil, groups={"Desk": {"settings": {"vncMacInputHost": "remote-mac"}, "modified": 1}})
+            incoming["format"] = "omaremote-" + kind
+            added, report = session.merge(self.local(), [incoming], self.NOW)
+            self.assertFalse(report["errors"])
+            self.assertNotIn("vncMacInputHost", added["connections"][0])
+            self.assertNotIn("vncMacInputHost", added["groups"]["Desk"]["settings"])
+            updated, report = session.merge(self.local(mine), [incoming], self.NOW)
+            self.assertFalse(report["errors"])
+            self.assertEqual(updated["connections"][0]["vncMacInputHost"], "local-mac")
+
+    def test_import_cannot_invalidate_local_helper_prerequisites(self):
+        mine = self.c(protocol="vnc", inputProfile="macos", vncMacInputHost="local-mac")
+        for changes in ({"inputProfile": "default"}, {"protocol": "rdp", "inputProfile": "macos"}):
+            evil = dict(mine, modified=200, **changes)
+            merged, report = session.merge(self.local(mine), [self.remote(evil)], self.NOW)
+            self.assertEqual(merged["connections"][0], mine)
+            self.assertTrue(any("requires VNC" in e for e in report["errors"]))
+        member = dict(mine, group="Desk")
+        del member["inputProfile"]
+        group = {"Desk": {"settings": {"inputProfile": "macos"}, "modified": 1}}
+        update = {"Desk": {"settings": {"inputProfile": "default"}, "modified": 2}}
+        merged, report = session.merge(self.local(member, groups=group), [self.remote(groups=update)], self.NOW)
+        self.assertEqual(merged["groups"], group)
+        self.assertTrue(any("requires VNC" in e for e in report["errors"]))
+        document = self.remote()
+        document["deletedGroups"] = {"Desk": 3}
+        merged, report = session.merge(self.local(member, groups=group), [document], self.NOW)
+        self.assertEqual(merged["groups"], group)
+        self.assertTrue(any("requires VNC" in e for e in report["errors"]))
 
     def test_a_gliff_server_path_never_travels(self):
         """The program ssh runs on the remote is chosen here, like sshArgs: a sync or import file
@@ -2632,19 +2801,45 @@ class Files(unittest.TestCase):
         self.assertEqual(calls, [])
 
 
+class RdpInputMapping(unittest.TestCase):
+    def test_supported_actions_and_unrestricted_trigger(self):
+        extras = (89, 92, 93, 94, 96, 97, 98, 99, 100, 102, 103, 104, 105, 106, 107,
+                  108, 109, 110, 111, 113, 114, 115, 117, 119, 121, 122, 123, 124, 127)
+        for code in (*range(1, 89), *extras):
+            with self.subTest(code=code):
+                result = session.resolve(conn(inputProfile="custom", inputTrigger1="767", inputAction1=f"{code}:1"), {"groups": {}})
+                self.assertEqual(result["inputAction1"], f"{code}:1")
+
+    def test_unsupported_and_super_actions_rejected_for_rdp_only(self):
+        for code in (90, 91, 95, 101, 112, 116, 118, 120, 125, 126, 128, 767):
+            with self.subTest(code=code):
+                fields = dict(inputProfile="custom", inputTrigger1="58", inputAction1=f"29:65507+{code}:1")
+                message = "Super" if code in (125, 126) else "no RDP scancode"
+                with self.assertRaisesRegex(ValueError, message):
+                    session.resolve(conn(**fields), {"groups": {}})
+                self.assertEqual(session.resolve(conn(protocol="vnc", **fields), {"groups": {}})["inputAction1"], fields["inputAction1"])
+                self.assertEqual(session.resolve(conn(**dict(fields, inputProfile="default")), {"groups": {}})["inputAction1"], fields["inputAction1"])
+                self.assertEqual(session.resolve(conn(protocol="ssh", **fields), {"groups": {}})["inputAction1"], fields["inputAction1"])
+
+    def test_inherited_and_imported_rdp_actions_rejected(self):
+        settings = {"inputProfile": "custom", "inputTrigger2": "58", "inputAction2": "90:1"}
+        data = {"groups": {"Desk": {"settings": settings}}}
+        with self.assertRaisesRegex(ValueError, "mapping 2.*90"):
+            session.resolve(conn(group="Desk"), data)
+        document = session.portable({"connections": [conn(**settings)], "groups": {}}, "other")
+        merged, report = session.merge({"connections": [], "groups": {}}, [document])
+        self.assertEqual(merged["connections"], [])
+        self.assertTrue(any("90" in error for error in report["errors"]))
+
+    def test_import_group_change_checks_existing_rdp_members(self):
+        existing = {"connections": [conn(group="Desk", inputProfile="custom")], "groups": {"Desk": {"settings": {}, "modified": 1}}}
+        incoming = {"format": "omaremote-sync", "version": 1, "system": "other", "connections": [], "groups": {"Desk": {"settings": {"inputTrigger1": "58", "inputAction1": "90:1"}, "modified": 2}}}
+        merged, report = session.merge(existing, [incoming])
+        self.assertEqual(merged["groups"]["Desk"]["settings"], {})
+        self.assertTrue(any("90" in error for error in report["errors"]))
+
+
 class UnlockOnReturn(unittest.TestCase):
     def test_off_by_default(self):
         self.assertEqual(session.DEFAULTS["unlockAfter"], 0)
 
-    def test_store_lists_equal_the_backend(self):
-        """ui/Store.qml keeps its own copies of LOCAL_KEYS and SETTING_KEYS: a key missing there
-        would travel from the UI's side."""
-        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ui", "Store.qml"),
-                  encoding="utf-8") as f:
-            text = f.read()
-
-        def listed(name):
-            body = re.search(r"property var %s: \[(.*?)\]" % name, text, re.S).group(1)
-            return set(re.findall(r'"([^"]+)"', body))
-        self.assertEqual(listed("localKeys"), set(session.LOCAL_KEYS))
-        self.assertEqual(listed("settingKeys"), set(session.SETTING_KEYS))

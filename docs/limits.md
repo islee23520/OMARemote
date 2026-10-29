@@ -49,3 +49,34 @@ like a broken one, and never written over. The trash keeps the newest 2000.
 The file itself is read through `omaremote-session read` (an ordinary file, at most 16 MiB, nested
 at most 64 deep), never whole by the window. What a command the window reads whole prints is
 capped too (`ANSWER_LIMITS`, 4 KiB to 16 MiB by command).
+
+## Optional Mac keyboard helper
+
+`native/mac-input/` is a manually installed, macOS-only executable, opt-in through a
+connection-local `vncMacInputHost` (VNC plus explicit macOS input profile). It does not
+change VNC display, mouse or clipboard transport, install itself, grant Accessibility,
+restart services, or replace Apple's IME. Its fixed executable must be on the SSH
+account's noninteractive command PATH; Terminal PATH/permission alone is insufficient.
+
+Protocol v1 accepts at most 31 printable ASCII bytes per line, excluding required LF;
+CR, NUL, leading/trailing whitespace, signs, leading-zero key numbers, extra arguments,
+and evdev numbers beyond 767 are rejected. Reads use a fixed 256-byte scratch buffer
+and a fixed 31-byte line buffer; key state is a fixed 768-entry array. Only `key 0 N`,
+`key 1 N`, `release`, and `ping` are accepted. stdout is nonblocking and contains only
+`ready 1` and `pong` lines; a failed write terminates rather than blocking key cleanup.
+
+Every complete valid command refreshes a 15-second monotonic liveness deadline;
+the VNC client supplies five-second pings. Partial lines do not keep keys held alive.
+EOF, malformed/unsupported commands, SIGTERM/SIGINT/SIGHUP, output failure and timeout
+release injected keys (ordinary keys before modifiers). Polling checks termination at
+100 ms intervals. Caps Lock's latch is not undone by release; only its physical down
+state is released. Repeated modifier/Caps downs are ignored; ordinary downs repeat.
+SIGKILL, process/OS failure and revoked event-posting permission cannot guarantee release.
+
+Mapping is physical ANSI/ISO/JIS, not text or remote-layout discovery. F1–F20 and
+common navigation/keypad/modifier keys are supported; Hangul/Hanja have no Apple
+physical key and require explicit mappings to a supported configured shortcut.
+Num Lock, Scroll Lock, Print Screen, Pause, media keys and F21+ are not guessed.
+Unsupported keys fail visibly with no automatic RFB keyboard fallback.
+`--check` preflights permission without prompting/posting; it cannot prove correct GUI
+session targeting, Secure Input acceptance, or Apple Korean IME composition.

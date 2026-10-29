@@ -184,5 +184,71 @@ class Reconnect(unittest.TestCase):
         self.assertEqual((rc, runs), (255, 1))
 
 
+    def typed(self, events):
+        """Sends terminal text events to the real helper; the fake ssh records its pty input."""
+        import base64, socket, threading
+        with tempfile.TemporaryDirectory() as d:
+            ssh = os.path.join(d, "ssh")
+            with open(ssh, "w") as f:
+                f.write(r'''#!/bin/sh
+stty -echo -icanon
+printf ready > "$FAKE_SSH_DIR/ready"
+cat > "$FAKE_SSH_DIR/input"
+''')
+            os.chmod(ssh, 0o700)
+            sock = os.path.join(d, "s")
+            config = "\n".join([f"arg={ssh}", "arg=pc.lan", "host=pc.lan", "font=monospace", "fontSize=10"]) + "\n"
+            env = dict(os.environ, OMAREMOTE_SOCKET=sock, FAKE_SSH_DIR=d, QT_QPA_PLATFORM="offscreen")
+            p = subprocess.Popen([HELPER], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, text=True, env=env)
+            p.stdin.write(config)
+            p.stdin.close()
+            c = socket.socket(socket.AF_UNIX)
+            try:
+                import time
+                for _ in range(100):
+                    try:
+                        c.connect(sock)
+                        break
+                    except OSError:
+                        time.sleep(0.05)
+                c.sendall(b"size 400 300 100\n")
+                for _ in range(100):
+                    if os.path.exists(os.path.join(d, "ready")):
+                        break
+                    time.sleep(0.05)
+                else:
+                    self.fail("fake SSH child did not start")
+                for event in events:
+                    c.sendall(event.encode("ascii") + b"\n")
+                expected = sum(len(base64.b64decode(event.split()[-1])) for event in events)
+                for _ in range(100):
+                    if os.path.exists(os.path.join(d, "input")) and os.path.getsize(os.path.join(d, "input")) >= expected:
+                        break
+                    time.sleep(0.05)
+                else:
+                    self.fail("fake SSH child did not receive input")
+                c.sendall(b"disconnect\n")
+                p.wait(timeout=10)
+            finally:
+                c.close()
+                if p.poll() is None:
+                    p.kill()
+                    p.wait()
+            with open(os.path.join(d, "input"), "rb") as f:
+                return f.read()
+
+    def test_standalone_multicodepoint_text_is_forwarded_once(self):
+        text = "🙂é"
+        import base64
+        event = "text " + base64.b64encode(text.encode()).decode()
+        self.assertEqual(self.typed([event]), text.encode())
+
+    def test_keyed_composed_text_is_forwarded_once(self):
+        import base64
+        text = "é"
+        event = "key 1 30 0 " + base64.b64encode(text.encode()).decode()
+        self.assertEqual(self.typed([event]), text.encode())
+
 if __name__ == "__main__":
     unittest.main()

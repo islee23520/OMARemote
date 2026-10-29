@@ -126,6 +126,36 @@ Rectangle {
         next[key] = value
         d = next
     }
+    function validInputMapping(trigger, action) {
+        if (!trigger && !action) return true
+        if (!/^[1-9][0-9]{0,2}$/.test(trigger) || Number(trigger) > 767) return false
+        var parts = action.split("+")
+        if (parts.length < 1 || parts.length > 8) return false
+        var seen = {}
+        for (var i = 0; i < parts.length; ++i) {
+            var m = /^\s*([1-9][0-9]{0,2}):([1-9][0-9]{0,9})\s*$/.exec(parts[i])
+            if (!m || Number(m[1]) > 767 || Number(m[2]) > 4294967295 || seen[m[1]]) return false
+            seen[m[1]] = true
+        }
+        return true
+    }
+
+    // Keep in sync with native/rdp/main.cpp's rdp_scancode; Super can be suppressed
+    // when keyboard capture is not granted and is therefore not a reliable action key.
+    function rdpActionProblem(action, index) {
+        var extra = [89, 92, 93, 94, 96, 97, 98, 99, 100, 102, 103, 104, 105, 106, 107,
+                     108, 109, 110, 111, 113, 114, 115, 117, 119, 121, 122, 123, 124, 127]
+        if (!action) return ""
+        var parts = action.split("+")
+        for (var i = 0; i < parts.length; ++i) {
+            var code = Number(parts[i].split(":")[0].trim())
+            if (code === 125 || code === 126)
+                return "RDP mapping " + index + ": Super action code " + code + " may be suppressed without keyboard capture; choose another action."
+            if (!(code >= 1 && code <= 88) && extra.indexOf(code) < 0)
+                return "RDP mapping " + index + ": action evdev code " + code + " has no RDP scancode; choose a supported key."
+        }
+        return ""
+    }
 
     // Hotkey windows are limited (Hotkeys.limit), and refresh what Hyprland binds for the check.
     function pickOpenIn(v) {
@@ -149,6 +179,28 @@ Rectangle {
 
     function save() {
         var c = Object.assign({}, d)
+        c.vncMacInputHost = String(c.vncMacInputHost || "").trim()
+        if (c.vncMacInputHost && (!isVnc || c.inputProfile !== "macos")) {
+            error = "Mac input helper requires VNC and the explicit macOS input profile. Clear its SSH host to disable it."
+            return
+        }
+        if (c.vncMacInputHost && !/^(?!-)[A-Za-z0-9._%:@\[\]-]{1,253}$/.test(c.vncMacInputHost)) {
+            error = "Mac input SSH host: enter a valid SSH host name or alias, not command text."
+            return
+        }
+        if (!validInputMapping(c.inputTrigger1 || "", c.inputAction1 || "") ||
+            !validInputMapping(c.inputTrigger2 || "", c.inputAction2 || "") ||
+            (c.inputTrigger1 && c.inputTrigger1 === c.inputTrigger2)) {
+            error = "Input mapping: enter a unique source evdev code and an action of evdev:keysym pairs."
+            return
+        }
+        if (isRdp && c.inputProfile !== "default" && c.inputProfile) {
+            var problem = rdpActionProblem(c.inputAction1 || "", 1) || rdpActionProblem(c.inputAction2 || "", 2)
+            if (problem) {
+                error = problem
+                return
+            }
+        }
         if (c.openIn === "hotkey" && shortcutProblem !== "") {
             error = "Shortcut: " + shortcutProblem
             return
@@ -494,6 +546,22 @@ Rectangle {
                     }
                 }
                 FormRow {
+                    inherited: root.fromGroup("vncWheelScale")
+                    label: "Wheel sensitivity"
+                    help: "Scale received VNC angle deltas (0.25–8×); 1× keeps existing behavior. Pixels are not converted."
+                    visible: root.isVnc
+                    Input {
+                        maximumLength: Limits.size
+                        placeholderText: "1"
+                        text: String(root.d.vncWheelScale === undefined ? 1 : root.d.vncWheelScale)
+                        onTextEdited: {
+                            var n = Number(text)
+                            if (text.trim() !== "" && isFinite(n) && n >= 0.25 && n <= 8)
+                                root.set("vncWheelScale", n)
+                        }
+                    }
+                }
+                FormRow {
                     inherited: root.fromGroup("viewOnly")
                     label: "View only"
                     help: "Watch without sending input"
@@ -650,6 +718,68 @@ Rectangle {
                         checked: !!root.d.grabKeyboard
                         onToggled: root.set("grabKeyboard", !checked)
                     }
+                }
+                FormRow {
+                    inherited: root.fromGroup("keyCapture")
+                    label: "Keyboard capture"
+                    visible: root.isRdp || root.isVnc || root.isGliff
+                    help: "Focused desktop consumes keys, including compositor shortcuts. Requires Wayland shortcut-inhibit support; " + Keymap.session("ctrl+alt+escape") + " releases capture and " + Keymap.session("ctrl+alt+g") + " toggles it. For RDP this affects Super key delivery."
+                    Segment {
+                        value: root.d.keyCapture || "auto"
+                        options: [{ value: "auto", label: "Auto" }, { value: "on", label: "On" }, { value: "off", label: "Off" }]
+                        onPicked: function (v) { root.set("keyCapture", v) }
+                    }
+                }
+                FormRow {
+                    inherited: root.fromGroup("inputProfile")
+                    label: "Input profile"
+                    visible: !root.isSsh
+                    help: "Chosen manually, never inferred from protocol. Default leaves input unchanged."
+                    Segment {
+                        value: root.d.inputProfile || "default"
+                        options: [{value: "default", label: "Default"}, {value: "windows", label: "Windows"},
+                                  {value: "linux", label: "Linux"}, {value: "macos", label: "macOS"}, {value: "custom", label: "Custom"}]
+                        onPicked: function (v) { root.set("inputProfile", v) }
+                    }
+                }
+                FormRow {
+                    label: "Mac input SSH host"
+                    visible: root.isVnc
+                    help: "Optional, this computer only. Requires the explicit macOS input profile, working SSH key/agent authentication, omaremote-mac-input installed on the Mac's SSH PATH, and manual Accessibility approval there. Empty disables it. Keyboard uses SSH exclusively; screen, mouse and clipboard remain VNC. No automatic install or permission changes."
+                    Input {
+                        maximumLength: Limits.host
+                        placeholderText: "SSH host/alias (empty: disabled)"
+                        text: root.d.vncMacInputHost || ""
+                        onTextEdited: root.set("vncMacInputHost", text)
+                    }
+                }
+                FormRow {
+                    inherited: root.fromGroup("inputTrigger1")
+                    label: "Mapping 1 source"
+                    visible: !root.isSsh && root.d.inputProfile !== "default"
+                    help: "Optional local evdev code; confirm the actual delivered key first. Empty pair disables mapping."
+                    Input { maximumLength: Limits.shortcut; placeholderText: "evdev code"; text: root.d.inputTrigger1 || ""; onTextEdited: root.set("inputTrigger1", text) }
+                }
+                FormRow {
+                    inherited: root.fromGroup("inputAction1")
+                    label: "Mapping 1 action"
+                    visible: !root.isSsh && root.d.inputProfile !== "default"
+                    help: "Ordered evdev:decimal X keysym pairs separated by +. Without the Mac input helper, VNC with the macOS profile maps Hangul/Hanja keys to Control+Space unless a source mapping matches. Explicit mappings also apply with the helper. CapsLock is not mapped automatically. The Mac shortcut must match; live Korean composition remains unverified."
+                    Input { maximumLength: Limits.shortcut; placeholderText: "29:65507+57:32"; text: root.d.inputAction1 || ""; onTextEdited: root.set("inputAction1", text) }
+                }
+                FormRow {
+                    inherited: root.fromGroup("inputTrigger2")
+                    label: "Mapping 2 source"
+                    visible: !root.isSsh && root.d.inputProfile !== "default"
+                    help: "Optional second distinct source, for example a separate Hanja key."
+                    Input { maximumLength: Limits.shortcut; placeholderText: "evdev code"; text: root.d.inputTrigger2 || ""; onTextEdited: root.set("inputTrigger2", text) }
+                }
+                FormRow {
+                    inherited: root.fromGroup("inputAction2")
+                    label: "Mapping 2 action"
+                    visible: !root.isSsh && root.d.inputProfile !== "default"
+                    help: "Ordered evdev:decimal keysym pairs; remote layout and VNC keymap must support them."
+                    Input { maximumLength: Limits.shortcut; placeholderText: "evdev:keysym"; text: root.d.inputAction2 || ""; onTextEdited: root.set("inputAction2", text) }
                 }
                 FormRow {
                     inherited: root.fromGroup("unlockAfter")
