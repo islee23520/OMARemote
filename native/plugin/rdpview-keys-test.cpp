@@ -47,6 +47,7 @@ class TestView : public RdpView
 	using RdpView::mouseMoveEvent;
 	using RdpView::mouseUngrabEvent;
 	using RdpView::wheelEvent;
+	using RdpView::toggleShortcuts;
 };
 
 // One Unix-socket session: what the view sent, and a way to speak as the session process.
@@ -269,6 +270,66 @@ int main(int argc, char** argv)
 		v.setProperty("inputAction1", "29:65507+183:65482");
 		v.keyPressEvent(&caps); v.keyReleaseEvent(&capsUp);
 		expect(s.heard() == "key 1 58 65509\nkey 0 58\n", "unsupported RDP action is never partly emitted");
+	}
+	{
+		Session s;
+		expect(s.start(path), "macos hangul session listens");
+		TestView v;
+		expect(s.acceptFrom(&v, path), "macos hangul view attaches");
+		v.setSessionProtocol("vnc");
+		v.setProperty("inputProfile", "macos");
+		s.heard();
+		QKeyEvent hangul = key(122, 0, true, false, Qt::NoModifier, 65329);
+		QKeyEvent hangulUp = key(122, 0, false);
+		v.keyPressEvent(&hangul); v.keyReleaseEvent(&hangulUp);
+		expect(s.heard() == "key 1 29 65507\nkey 1 57 32\nkey 0 57\nkey 0 29\n",
+		       "macOS VNC turns the Hangul key into Control+Space");
+		QKeyEvent a = key(30, Qt::Key_A, true, false, Qt::NoModifier, 97);
+		QKeyEvent aUp = key(30, Qt::Key_A, false);
+		v.keyPressEvent(&a); v.keyReleaseEvent(&aUp);
+		expect(s.heard() == "key 1 30 97\nkey 0 30\n", "macOS VNC leaves Latin keys physical");
+		v.setProperty("macInputHelper", true);
+		v.keyPressEvent(&hangul); v.keyReleaseEvent(&hangulUp);
+		expect(s.heard() == "key 1 122 65329\nkey 0 122\n", "Mac helper receives physical Hangul without the legacy chord");
+		QKeyEvent helperHanja = key(123, 0, true, false, Qt::NoModifier, 65332);
+		QKeyEvent helperHanjaUp = key(123, 0, false);
+		v.keyPressEvent(&helperHanja); v.keyReleaseEvent(&helperHanjaUp);
+		expect(s.heard() == "key 1 123 65332\nkey 0 123\n", "Mac helper receives physical Hanja");
+		v.setProperty("inputTrigger1", "122");
+		v.setProperty("inputAction1", "42:65505+57:32");
+		v.keyPressEvent(&hangul); v.keyReleaseEvent(&hangulUp);
+		expect(s.heard() == "key 1 42 65505\nkey 1 57 32\nkey 0 57\nkey 0 42\n", "helper preserves explicit user mapping");
+		v.setProperty("inputTrigger1", "");
+		v.setProperty("inputAction1", "");
+		v.setProperty("macInputHelper", false);
+		v.keyPressEvent(&hangul); v.keyReleaseEvent(&hangulUp);
+		expect(s.heard() == "key 1 29 65507\nkey 1 57 32\nkey 0 57\nkey 0 29\n", "disabling helper restores the legacy chord");
+		v.setProperty("inputProfile", "default");
+		v.keyPressEvent(&hangul); v.keyReleaseEvent(&hangulUp);
+		expect(s.heard() == "key 1 122 65329\nkey 0 122\n", "default never rewrites the Hangul key");
+		v.setProperty("inputProfile", "windows");
+		v.keyPressEvent(&hangul); v.keyReleaseEvent(&hangulUp);
+		expect(s.heard() == "key 1 122 65329\nkey 0 122\n", "Windows still receives XK_Hangul");
+		v.setProperty("inputProfile", "macos");
+		v.setProperty("inputTrigger1", "58");
+		v.setProperty("inputAction1", "42:65505+57:32");
+		QKeyEvent caps = key(58, Qt::Key_CapsLock, true);
+		QKeyEvent capsUp = key(58, Qt::Key_CapsLock, false);
+		v.keyPressEvent(&caps); v.keyReleaseEvent(&capsUp);
+		expect(s.heard() == "key 1 42 65505\nkey 1 57 32\nkey 0 57\nkey 0 42\n",
+		       "an explicit macOS mapping is not replaced by Control+Space");
+		v.setProperty("inputTrigger1", "122");
+		v.setProperty("inputAction1", "not-a-chord");
+		v.setProperty("inputTrigger2", "123");
+		v.setProperty("inputAction2", "56:65513+57:32");
+		QKeyEvent hanja = key(123, 0, true, false, Qt::NoModifier, 65332);
+		QKeyEvent hanjaUp = key(123, 0, false);
+		v.keyPressEvent(&hanja); v.keyReleaseEvent(&hanjaUp);
+		expect(s.heard() == "key 1 56 65513\nkey 1 57 32\nkey 0 57\nkey 0 56\n",
+		       "a malformed first mapping does not swallow the second");
+		v.keyPressEvent(&hangul); v.keyReleaseEvent(&hangulUp);
+		expect(s.heard() == "key 1 122 65329\nkey 0 122\n",
+		       "a mapped Hangul key is not rewritten when its action is unusable");
 	}
 
 	for (const QString& mode : { QStringLiteral("on"), QStringLiteral("auto") })
@@ -598,9 +659,8 @@ int main(int argc, char** argv)
 		expect(!v.shortcutsCaptured(), "ineligible is not captured");
 	}
 
-	// The release chord's counterpart. Without a compositor nothing is ever captured, so both
-	// release and rearm are no-ops whatever the state says; the latch itself only a live
-	// compositor can leave (releaseShortcuts runs on "active").
+	// Release and rearm are no-ops without a real inhibitor activation; only the compositor
+	// can confirm the capture needed by releaseShortcuts().
 	{
 		Session s;
 		expect(s.start(path), "the stand-in session listens");
@@ -621,6 +681,83 @@ int main(int argc, char** argv)
 		v.keyPressEvent(&b);
 		lines = s.heard();
 		expect(lines.count("key 1 48") == 1, "a key still types on the remote");
+	}
+
+	// The Ctrl+Alt+G chord, offscreen so no compositor is ever on the other end: the intent
+	// (asking or not) is still visible in the "released" state and the toggle's answers, and
+	// the compositor's own truth never comes from here. Repeat handling is supplied explicitly.
+	{
+		Session s;
+		expect(s.start(path), "the stand-in session listens");
+		TestView v;
+		QQuickWindow window;
+		expect(s.acceptFrom(&v, path), "the view attaches");
+		// "auto" on a plain RDP session: the pointer never asks, the chord does.
+		v.setSessionProtocol(QStringLiteral("rdp"));
+		expect(focusInView(v, window), "the view has the keyboard");
+		expect(v.captureState() == QLatin1String("ineligible"),
+		       "auto without the pointer does not ask");
+		expect(v.toggleShortcuts(), "the toggle asks on an auto RDP session");
+		expect(v.captureState() == QLatin1String("unsupported"),
+		       "a chord request asks the compositor's protocol (unsupported here)");
+		expect(v.toggleShortcuts(true), "a repeated toggle is consumed");
+		expect(v.captureState() == QLatin1String("unsupported"),
+		       "a repeated toggle does not release the request");
+		expect(v.toggleShortcuts(), "the next physical toggle releases the request");
+		expect(v.captureState() == QLatin1String("released"),
+		       "the chord's release shows as released");
+		v.rearmShortcuts();
+		expect(v.captureState() == QLatin1String("ineligible"),
+		       "rearm clears the latch, back to the stored policy (auto asks nothing here)");
+		// "off" is off: the toggle acts on nothing and leaves G unmatched.
+		v.setKeyCaptureMode(QStringLiteral("off"));
+		expect(v.captureState() == QLatin1String("off"), "off is off before the chord");
+		expect(!v.toggleShortcuts(), "the toggle does not act in off");
+		expect(v.captureState() == QLatin1String("off"), "off is off after the chord");
+		// The chord's G takes them again from a release, and the say-so dies with the context:
+		// eligibility is re-checked every time.
+		v.setKeyCaptureMode(QStringLiteral("auto"));
+		v.releaseShortcuts();
+		expect(v.captureState() == QLatin1String("ineligible"),
+		       "a release in auto with the pointer out is just ineligible");
+		expect(v.toggleShortcuts(), "the toggle asks again");
+		expect(v.captureState() == QLatin1String("unsupported"),
+		       "the request stands until the next toggle or a context loss");
+		// Without a session there is no context: nothing acts, nothing swallows G.
+		v.setSocketPath(QString());
+		expect(waitUntil([&] { return !v.attached(); }), "the view detaches");
+		expect(!v.toggleShortcuts(), "the toggle does not act without a session");
+		expect(v.captureState() == QLatin1String("ineligible"), "no session is ineligible");
+	}
+	// A released override is rearmed by each of the prior ownership-return actions.
+	{
+		Session s;
+		expect(s.start(path), "the stand-in session listens");
+		TestView v;
+		QQuickWindow window;
+		expect(s.acceptFrom(&v, path), "the view attaches");
+		v.setSessionProtocol(QStringLiteral("rdp"));
+		v.setKeyCaptureMode(QStringLiteral("on"));
+		expect(focusInView(v, window), "the view has the keyboard");
+		expect(v.toggleShortcuts() && v.captureState() == QLatin1String("released"),
+		       "G releases an asking view");
+		QHoverEvent enter(QEvent::HoverEnter, QPointF(10, 10), QPointF(), QPointF(10, 10));
+		v.hoverEnterEvent(&enter);
+		expect(v.captureState() == QLatin1String("unsupported"),
+		       "pointer re-entry rearms the stored capture policy");
+		expect(v.toggleShortcuts() && v.captureState() == QLatin1String("released"),
+		       "G releases capture again before click rearm");
+		mouse(v, QEvent::MouseButtonPress, Qt::LeftButton);
+		expect(v.captureState() == QLatin1String("unsupported"),
+		       "click rearms the stored capture policy");
+		expect(v.toggleShortcuts() && v.captureState() == QLatin1String("released"),
+		       "G releases capture again before focus rearm");
+		QFocusEvent out(QEvent::FocusOut);
+		v.focusOutEvent(&out);
+		QFocusEvent in(QEvent::FocusIn);
+		v.focusInEvent(&in);
+		expect(v.captureState() == QLatin1String("unsupported"),
+		       "keyboard focus return rearms the stored capture policy");
 	}
 
 	if (failures == 0)

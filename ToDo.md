@@ -2,6 +2,18 @@
 
 **Current phase: M1 implemented; local verification recorded below, live activation acceptance pending.** Connection capture policy, QML integration, real Wayland `active`/`inactive` listeners, the runtime RDP Super gate, and keyboard cleanup are implemented. Isolated offscreen Quickshell runs of the real SessionView against local sockets verified RDP/VNC `on → unsupported → ineligible` and SSH `off`, without touching the running app. A real activation/release-chord test remains unavailable: installed Hyprland 0.56.2 rejects `--headless` and its Aquamarine backend cannot acquire a separate seat; no alternative compositor is installed. M2/M3 remain pending; CapsLock remains unconfirmed.
 
+## Current module — Mac physical-key helper over SSH
+
+- [x] Diagnose live symptom: input source changes to Korean, but VNC typing remains Latin.
+- [x] Select explicit opt-in SSH stdio transport; retain VNC display/pointer/clipboard and existing default behavior.
+- [x] Implement connection-local helper host setting, safe SSH argv, Qt mode propagation and editor prerequisites.
+- [x] Implement native VNC helper subprocess, handshake, exclusive physical-key routing and cleanup.
+- [x] Implement the macOS CoreGraphics helper, build/install instructions and permission/readiness failures.
+- [x] Reverify full affected modules after the startup-order correction: full discovery passed 422 tests, Qt keys and portable helper checks passed. Actual fake-helper/RFB routing was observed. After the per-key CGEvent construction fix and the connection-local CapsLock-to-Control+Space mapping, Qt keys and full VNC/session modules passed again (269 Python tests).
+- [x] Build on the target Mac and check installed-helper permissions without prompting or injecting events; the existing SSH execution context reports posting permission available. Installation was explicitly approved, user-owned, with original connection settings backed up and only macbook enabled.
+- [x] User confirmed Korean typing works with the physical-key helper, then reported the remaining CapsLock toggle issue. Applied an explicit macbook-only evdev 58 to Control+Space mapping, preserving other connections; the user subsequently confirmed all done. Live acceptance is user-reported, not an assistant screenshot/typing observation.
+
+
 ## M1 — Diagnose input ownership and implement focused capture
 
 - [ ] Inspect the package/source input path and relevant existing tests before changing behavior. Record the actual Qt/Wayland/fcitx5/compositor versions and session/backend settings used for subsequent live acceptance.
@@ -12,10 +24,12 @@
 - [x] Implement tracked-key/modifier cleanup and stale-repeat suppression without synthesizing mouse releases; exercise real RdpView/socket boundaries in `rdpview-keys-test`.
 - [x] Add behavioral settings/key-cleanup coverage and user documentation. The permanent native regression runs as `QT_QPA_PLATFORM=offscreen native/build/rdpview-keys-test`; full-suite results are recorded under "M1 implementation and local verification" below.
 - [x] Add the capture-toggle session chord (`ctrl+alt+g`, an unused chord; `ctrl+alt+t` is taken
-  by own-window-to-tab): release while captured, take the shortcuts back through the new
-  `rearmShortcuts()` without a click, with a truthful `released` capture state between. The
-  chord follows Settings › Keyboard like every session chord; live activation remains an item
-  below.
+  by own-window-to-tab): release while captured, take the shortcuts back through `rearmShortcuts()`
+  without a click, with a truthful `released` capture state between — and, on an "auto" RDP/VNC
+  desktop, ask for capture in the first place (`toggleShortcuts()`, the chord's say-so kept in
+  `m_captureOverride`, reset on mode/protocol change, detach and reconnect; "off" answers false so
+  the key stays unmatched). The chord follows Settings › Keyboard like every session chord; live
+  activation remains an item below.
 
 ### M1 live acceptance
 
@@ -26,7 +40,9 @@
 - [ ] Press the toggle chord on a captured desktop (RDP/VNC `on`, Gliff auto): the status bar
   shows ⌨ captured → ⌨ released, compositor shortcuts work again, and the same chord takes the
   shortcuts back (⌨ captured) without a click; a key typed between the two still reaches the
-  remote. RDP: verify Super delivery follows the toggled state.
+  remote. On an uncaptured "auto" RDP/VNC desktop the same chord asks for capture and the status
+  bar follows (⌨ idle → ⌨ captured, Super delivery included); on "off" it does nothing and the
+  key reaches the desktop. RDP: verify Super delivery follows the toggled state.
 
 ### M1 implementation and local verification
 
@@ -71,7 +87,7 @@ scaffolding and created crash reports were removed; the running app was untouche
 - [x] Add `inputProfile` with unchanged/default behavior and explicit Windows/Linux/macOS/custom selection; never infer the target OS from RDP/VNC/SSH/Gliff.
 - [ ] Verify the effective active binding and actual raw events/IME consumption before choosing a source; CapsLock remains unconfirmed. Two editable source-evdev → ordered remote evdev/keysym mappings are implemented, disabled unless both fields are entered; settings are portable.
 - [ ] Verify RDP Korean scancodes and VNC `0xff31`/`0xff34` delivery. Local fake RFB test now observes the exact VNC keysyms on press and release; actual remote keymap and RDP delivery remain unverified. Keep Gliff evdev/keymap semantics separate.
-- [x] Make macOS input-source combinations explicitly configurable. No automatic Caps Lock/Control+Space fallback. Pair generated keys and preserve modifiers already held by the user.
+- [x] Make macOS input-source combinations explicitly configurable. Only the explicit macOS profile on VNC supplies Control+Space for Hangul/Hanja evdev keys 122/123 when no user mapping targets that key; a matching user mapping takes precedence even if its action is unusable. No automatic CapsLock substitution or OS detection. Pair generated keys and preserve modifiers already held by the user. Live Mac switching and subsequent Korean typing remain unverified; Unicode-syllable substitution and the item-level IME flag experiment are not retained.
 - [ ] Determine the correct item-scoped desktop canvas IME behavior without setting global `QT_IM_MODULE=none`. Retain local IME for manager fields and SSH composition/committed text; prevent duplicate committed-text/raw-key delivery.
 - [ ] Add regression coverage for default/missing settings, explicit/custom actions, cleanup, protocol routing, SSH committed text, and settings round trips; update user-facing documentation for the implemented controls. Socket and fake-SSH PTY tests cover text-bearing key events, but actual Qt input-method commit/preedit and duplication remain untested.
 

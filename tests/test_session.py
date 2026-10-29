@@ -657,6 +657,38 @@ class Vnc(unittest.TestCase):
         self.assertIn("scaling=fit", lines)
         self.assertFalse(any(l.startswith("password=") for l in lines))
 
+    def test_mac_helper_exact_argv_is_independent_of_vnc_credentials_and_port(self):
+        c = conn(protocol="vnc", inputProfile="macos", vncMacInputHost="mac-keyboard",
+                 port=5999, username="vnc-user", sshArgs="-p 2222", sshKey="/private/key")
+        lines = session.build_vnc_config(c, password="vnc-password")
+        argv = [line.split("=", 1)[1] for line in lines if line.startswith("macInputArg=")]
+        self.assertEqual(argv, ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=5",
+                                "-o", "ServerAliveCountMax=2", "--", "mac-keyboard", "omaremote-mac-input", "--stdio"])
+        self.assertIn("port=5999", lines)
+        self.assertIn("username=vnc-user", lines)
+        self.assertIn("password=vnc-password", lines)
+
+    def test_mac_helper_default_off_and_validation(self):
+        self.assertFalse(any(line.startswith("macInputArg=") for line in session.build_vnc_config(conn(protocol="vnc"))))
+        for host in ("mac-alias", "alice@mac.lan", "[::1]", "a" * 253):
+            session.build_vnc_config(conn(protocol="vnc", inputProfile="macos", vncMacInputHost=host))
+        for host in ("-oProxyCommand=evil", "mac\narg=bad", "mac;evil", "a" * 254, " ", 123):
+            with self.subTest(host=host), self.assertRaises(ValueError):
+                session.build_vnc_config(conn(protocol="vnc", inputProfile="macos", vncMacInputHost=host))
+        for protocol, profile in (("rdp", "macos"), ("ssh", "macos"), ("gliff", "macos"), ("vnc", "default"), ("vnc", "custom")):
+            c = conn(protocol=protocol, inputProfile=profile, vncMacInputHost="mac")
+            with self.subTest(protocol=protocol, profile=profile):
+                with self.assertRaisesRegex(ValueError, "requires VNC"):
+                    session.resolve(c, {"groups": {}})
+                with self.assertRaisesRegex(ValueError, "requires VNC"):
+                    session.build_vnc_config(c)
+
+    def test_mac_helper_connection_only_never_inherited(self):
+        data = {"groups": {"Desk": {"settings": {"vncMacInputHost": "unwanted"}}}}
+        self.assertEqual(session.resolve(conn(protocol="vnc", group="Desk"), data)["vncMacInputHost"], "")
+        self.assertNotIn("vncMacInputHost", session.SETTING_KEYS)
+        self.assertEqual(session.too_long({"vncMacInputHost": "a" * 254}), ("vncMacInputHost", 253))
+
     def test_vnc_client_is_found_by_protocol(self):
         self.assertTrue(session.tab_client("vnc").endswith("omaremote-vnc"))
         self.assertTrue(session.tab_client("rdp").endswith("omaremote-rdp"))
@@ -1041,6 +1073,42 @@ class Sync(unittest.TestCase):
         incoming = self.remote(groups={"Servers": {"settings": {"unlockAfter": 1}, "modified": 9}})
         data, _ = session.merge(local, [incoming], self.NOW)
         self.assertEqual(data["groups"]["Servers"]["settings"], {"unlockAfter": 5})
+
+    def test_mac_input_host_never_travels_or_activates_from_import(self):
+        mine = self.c(protocol="vnc", inputProfile="macos", vncMacInputHost="local-mac")
+        evil = self.c(protocol="vnc", inputProfile="macos", modified=200, vncMacInputHost="remote-mac")
+        for kind in ("sync", "export"):
+            data = self.local(mine, groups={"Desk": {"settings": {"vncMacInputHost": "local-mac"}}})
+            self.assertNotIn("vncMacInputHost", json.dumps(session.portable(data, "here", kind)))
+            incoming = self.remote(evil, groups={"Desk": {"settings": {"vncMacInputHost": "remote-mac"}, "modified": 1}})
+            incoming["format"] = "omaremote-" + kind
+            added, report = session.merge(self.local(), [incoming], self.NOW)
+            self.assertFalse(report["errors"])
+            self.assertNotIn("vncMacInputHost", added["connections"][0])
+            self.assertNotIn("vncMacInputHost", added["groups"]["Desk"]["settings"])
+            updated, report = session.merge(self.local(mine), [incoming], self.NOW)
+            self.assertFalse(report["errors"])
+            self.assertEqual(updated["connections"][0]["vncMacInputHost"], "local-mac")
+
+    def test_import_cannot_invalidate_local_helper_prerequisites(self):
+        mine = self.c(protocol="vnc", inputProfile="macos", vncMacInputHost="local-mac")
+        for changes in ({"inputProfile": "default"}, {"protocol": "rdp", "inputProfile": "macos"}):
+            evil = dict(mine, modified=200, **changes)
+            merged, report = session.merge(self.local(mine), [self.remote(evil)], self.NOW)
+            self.assertEqual(merged["connections"][0], mine)
+            self.assertTrue(any("requires VNC" in e for e in report["errors"]))
+        member = dict(mine, group="Desk")
+        del member["inputProfile"]
+        group = {"Desk": {"settings": {"inputProfile": "macos"}, "modified": 1}}
+        update = {"Desk": {"settings": {"inputProfile": "default"}, "modified": 2}}
+        merged, report = session.merge(self.local(member, groups=group), [self.remote(groups=update)], self.NOW)
+        self.assertEqual(merged["groups"], group)
+        self.assertTrue(any("requires VNC" in e for e in report["errors"]))
+        document = self.remote()
+        document["deletedGroups"] = {"Desk": 3}
+        merged, report = session.merge(self.local(member, groups=group), [document], self.NOW)
+        self.assertEqual(merged["groups"], group)
+        self.assertTrue(any("requires VNC" in e for e in report["errors"]))
 
     def test_a_gliff_server_path_never_travels(self):
         """The program ssh runs on the remote is chosen here, like sshArgs: a sync or import file

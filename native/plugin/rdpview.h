@@ -41,20 +41,21 @@ class RdpView : public QQuickItem
 	Q_PROPERTY(bool followSize READ followSize WRITE setFollowSize NOTIFY followSizeChanged)
 	// keyCaptureMode asks for the compositor's shortcuts, Super and Hyprland's own keys with
 	// them: "on" while the session is live and this view has the keyboard (the pointer's place
-	// is not the keyboard's), "auto" (the default) only while captureShortcuts is set and the
-	// pointer is on the picture (Gliff's own behaviour), "off" never. Anything else is "auto".
+	// is not the keyboard's), "auto" (the default) while captureShortcuts is set and the pointer
+	// is on the picture (Gliff's own behaviour) or the Ctrl+Alt+G chord has asked for this
+	// session, "off" never. Anything else is "auto".
 	Q_PROPERTY(QString keyCaptureMode READ keyCaptureMode WRITE setKeyCaptureMode NOTIFY keyCaptureModeChanged)
 	// The "auto" request: whether the session's protocol wants every key (Gliff's switch).
 	Q_PROPERTY(bool captureShortcuts READ captureShortcuts WRITE setCaptureShortcuts NOTIFY captureShortcutsChanged)
 	// Truth about the shortcuts right now: "off" the mode never takes them; "ineligible" this
 	// view is not asking (focus, hidden, window inactive, session not live, pointer off the
-	// picture, the release key latched); "unsupported" the compositor offers the protocol
+	// picture, the chord's release latch); "unsupported" the compositor offers the protocol
 	// neither; "inactive" it is asked but not held (not confirmed, not creatable, or the
 	// compositor took it back — its `inactive`); "released" the release key or chord gave them
-	// back and only a click, the pointer re-entering, focus or rearmShortcuts takes them again;
-	// "active" the compositor's `active` event: every key, Super included, is ours. Losing the
-	// keyboard restores the compositor's shortcuts without an event, so eligibility is
-	// re-checked before an "active" is believed and losing the keyboard ends it here.
+	// back until the next explicit G or an ownership-return action (click, pointer re-entry, focus).
+	// "active" is the compositor's `active` event: every key, Super included, is ours. Losing the
+	// keyboard restores the compositor's shortcuts without an event, so eligibility is re-checked
+	// before an "active" is believed and losing the keyboard ends it here.
 	Q_PROPERTY(QString captureState READ captureState NOTIFY captureStateChanged)
 	// Whether the compositor's shortcuts are held right now (captureState === "active").
 	Q_PROPERTY(bool shortcutsCaptured READ shortcutsCaptured NOTIFY shortcutsCapturedChanged)
@@ -67,6 +68,7 @@ class RdpView : public QQuickItem
 	Q_PROPERTY(QString sessionProtocol READ sessionProtocol WRITE setSessionProtocol NOTIFY sessionProtocolChanged)
 	// User-entered mappings: source evdev code and ordered evdev:keysym remote chord.
 	Q_PROPERTY(QString inputProfile MEMBER m_inputProfile)
+	Q_PROPERTY(bool macInputHelper MEMBER m_macInputHelper)
 	Q_PROPERTY(QString inputTrigger1 MEMBER m_inputTrigger1)
 	Q_PROPERTY(QString inputAction1 MEMBER m_inputAction1)
 	Q_PROPERTY(QString inputTrigger2 MEMBER m_inputTrigger2)
@@ -122,11 +124,18 @@ public:
 	// A lost SSH connection that is being tried again: try at once, or give it up.
 	Q_INVOKABLE void reconnectNow();
 	Q_INVOKABLE void cancelReconnect();
-	// The shortcuts back after the release key or chord gave them up: as a click on the picture
-	// would, without needing the mouse. No-op unless they were given up by the release latch
-	// (a view not asking for them — focus lost, mode off — stays as it is).
+	// The Ctrl+Alt+G chord, both ways. With the session eligible (live, the keyboard's, not
+	// "off"): asked (Gliff's auto with the pointer on the picture, "on", or a previous G's
+	// request) means release, otherwise it asks for the shortcuts — an "auto" RDP/VNC session's
+	// way in, where no stored setting ever changes. Repeats are consumed without toggling.
+	// Returns whether it acted; a false keeps the key unmatched (nothing swallowed on an invalid
+	// context). The compositor's own truth ("active", "inactive") only ever comes from its events.
+	Q_INVOKABLE bool toggleShortcuts(bool autoRepeat = false);
+	// Clear a release latch and return to the stored capture policy, as on click, pointer re-entry,
+	// or keyboard focus return. No-op unless the override is Released.
 	Q_INVOKABLE void rearmShortcuts();
-	// Hyprland's shortcuts back, while the pointer stays on the picture (the session keys + Esc).
+	// Return Hyprland's shortcuts while the pointer stays on the picture (session keys + Esc).
+	// Only acts when an inhibitor object exists; the compositor may not yet have confirmed it active.
 	Q_INVOKABLE void releaseShortcuts();
 	Q_INVOKABLE int cachedCursors() const { return int(m_cursors.size()); } // for tests
 
@@ -189,7 +198,8 @@ private:
 	void sendClipboard(bool force = false);
 	void offerClipboard(const QString& text, bool force);
 	void updateCapture();
-	bool asksForShortcuts() const; // the asking without the release latch (captureEligible minus it)
+	bool captureContextEligible() const;
+	bool asksForShortcuts() const; // whether the current context and policy request shortcuts
 	bool captureEligible() const; // whether this view asks for the shortcuts, before the compositor's say
 	void updateCaptureState();
 	void onInhibitActivation(); // the compositor's active/inactive arrived
@@ -238,12 +248,23 @@ private:
 	QString m_keyCaptureMode = QStringLiteral("auto");
 	QString m_sessionProtocol;
 	QString m_captureState = QStringLiteral("ineligible");
-	bool m_released = false; // the release key gave the shortcuts back; a click or leaving undoes it
+	// The chord's own intent, on top of the stored mode: Released the release key or chord gave
+	// the shortcuts back (until G or a click/pointer/focus return), Requested the chord asked for
+	// them in "auto" (never shown as capture; the compositor's events say "active"). FollowConfig
+	// is the stored policy alone.
+	enum class CaptureOverride
+	{
+		FollowConfig,
+		Requested,
+		Released
+	};
+	CaptureOverride m_captureOverride = CaptureOverride::FollowConfig;
 	bool m_pointerInside = false; // "auto" takes the shortcuts only with the pointer on the picture
 	QString m_releaseKey = QStringLiteral("shift+escape");
 	qint64 m_lastEscape = 0; // for double-escape
 	ShortcutInhibit m_inhibit;
 	QString m_inputProfile = QStringLiteral("default");
+	bool m_macInputHelper = false;
 	QString m_inputTrigger1, m_inputAction1, m_inputTrigger2, m_inputAction2;
 	QSet<quint32> m_mappedPressed;
 	QSet<quint32> m_pressed;

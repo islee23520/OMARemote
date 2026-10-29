@@ -12,6 +12,7 @@
 #include <QSGTexture>
 
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -145,6 +146,7 @@ void RdpView::detach()
 	forgetSurfaces();
 	m_showTaken = true;
 	m_drawnSeq = 0;
+	m_captureOverride = CaptureOverride::FollowConfig; // the next session starts without the chord's say-so
 	emit attachedChanged();
 	updateCapture();
 }
@@ -389,6 +391,8 @@ void RdpView::setState(const QString& state, int code)
 	m_exitCode = code;
 	if (state == QLatin1String("ended") || state == QLatin1String("failed") || state == QLatin1String("detached"))
 		loseKeyboard();
+	if (state != QLatin1String("connected"))
+		m_captureOverride = CaptureOverride::FollowConfig; // a reconnect starts without the chord's say-so
 	updateCapture();
 	emit stateChanged();
 }
@@ -666,21 +670,37 @@ void RdpView::itemChange(ItemChange change, const ItemChangeData& value)
 	}
 }
 
-// The asking, without the release latch: a live session, the keyboard, and the mode's own
-// conditions (the pointer on the picture for "auto").
-bool RdpView::asksForShortcuts() const
+// The context a chord or the mode needs, whatever the chord's own latch says: a live session,
+// the keyboard's, and not "off".
+bool RdpView::captureContextEligible() const
 {
 	if (m_keyCaptureMode == QLatin1String("off") || m_fd < 0 ||
 	    m_state == QLatin1String("ended") || m_state == QLatin1String("failed"))
 		return false;
-	if (!hasActiveFocus() || !isVisible() || !window() || !window()->isActive())
+	return hasActiveFocus() && isVisible() && window() && window()->isActive();
+}
+
+// The asking: the context, and the mode's own conditions (the pointer on the picture for "auto")
+// or the chord's request.
+bool RdpView::asksForShortcuts() const
+{
+	if (!captureContextEligible())
 		return false;
-	return m_keyCaptureMode == QLatin1String("on") || (m_captureShortcuts && m_pointerInside);
+	switch (m_captureOverride)
+	{
+		case CaptureOverride::Released:
+			return false;
+		case CaptureOverride::Requested:
+			return true;
+		case CaptureOverride::FollowConfig:
+			return m_keyCaptureMode == QLatin1String("on") || (m_captureShortcuts && m_pointerInside);
+	}
+	return false;
 }
 
 bool RdpView::captureEligible() const
 {
-	return !m_released && asksForShortcuts();
+	return asksForShortcuts();
 }
 
 QString RdpView::captureState() const
@@ -699,9 +719,11 @@ void RdpView::updateCaptureState()
 	if (m_keyCaptureMode == QLatin1String("off"))
 		next = QStringLiteral("off");
 	else if (!captureEligible())
-		// The latch alone keeps a still-asking view from the shortcuts; anything else (focus,
-		// hidden, the session gone) is plain ineligibility whatever the latch says.
-		next = m_released && asksForShortcuts() ? QStringLiteral("released") : QStringLiteral("ineligible");
+		// The chord's release latch alone keeps a still-asking context from the shortcuts;
+		// anything else (focus, hidden, the session gone) is plain ineligibility.
+		next = captureContextEligible() && m_captureOverride == CaptureOverride::Released
+		       ? QStringLiteral("released")
+		       : QStringLiteral("ineligible");
 	else if (!ShortcutInhibit::supported())
 		next = QStringLiteral("unsupported");
 	else
@@ -764,22 +786,37 @@ void RdpView::loseKeyboard()
 		send("blur");
 }
 
+// Release an existing inhibitor request, whether or not the compositor confirmed it active.
+// Without an inhibitor there is nothing to release; unsupported requests remain unsupported.
 void RdpView::releaseShortcuts()
 {
-	if (!shortcutsCaptured())
+	if (!m_inhibit.held())
 		return;
-	m_released = true;
+	m_captureOverride = CaptureOverride::Released;
 	updateCapture();
 }
 
+// The shortcuts back after the release key or chord gave them up: the release latch is the
+// only thing keeping a still-asking view from them, so clearing it lets the stored policy
+// ask again. A view not holding the latch — never asked, or a chord request — keeps as it is.
 void RdpView::rearmShortcuts()
 {
-	// The release key's counterpart: the latch is the only thing keeping a still-asking view
-	// from the shortcuts (a click, the pointer re-entering or focus arriving does the same).
-	if (!m_released)
+	if (m_captureOverride != CaptureOverride::Released)
 		return;
-	m_released = false;
+	m_captureOverride = CaptureOverride::FollowConfig;
 	updateCapture();
+}
+
+bool RdpView::toggleShortcuts(bool autoRepeat)
+{
+	if (!captureContextEligible())
+		return false;
+	if (autoRepeat)
+		return true;
+	const bool asking = asksForShortcuts() || m_inhibit.held();
+	m_captureOverride = asking ? CaptureOverride::Released : CaptureOverride::Requested;
+	updateCapture();
+	return true;
 }
 
 void RdpView::setCaptureShortcuts(bool capture)
@@ -798,6 +835,8 @@ void RdpView::setKeyCaptureMode(const QString& mode)
 	if (normalized == m_keyCaptureMode)
 		return;
 	m_keyCaptureMode = normalized;
+	// The stored policy changed: the chord's say-so starts over.
+	m_captureOverride = CaptureOverride::FollowConfig;
 	emit keyCaptureModeChanged();
 	updateCapture();
 }
@@ -809,6 +848,8 @@ void RdpView::setSessionProtocol(const QString& protocol)
 	if (m_sessionProtocol == QLatin1String("rdp") && shortcutsCaptured())
 		send("capture 0");
 	m_sessionProtocol = protocol;
+	// Another session's protocol: the chord's say-so never carries over.
+	m_captureOverride = CaptureOverride::FollowConfig;
 	if (protocol == QLatin1String("rdp") && shortcutsCaptured())
 		send("capture 1");
 	emit sessionProtocolChanged();
@@ -857,12 +898,8 @@ static int buttonNumber(Qt::MouseButton b)
 
 void RdpView::mousePressEvent(QMouseEvent* e)
 {
+	rearmShortcuts();
 	forceActiveFocus(Qt::MouseFocusReason);
-	if (m_released)
-	{
-		m_released = false;
-		updateCapture();
-	}
 	const int b = buttonNumber(e->button());
 	const QPoint p = toRemote(e->position());
 	if (b)
@@ -923,8 +960,7 @@ void RdpView::hoverEnterEvent(QHoverEvent* e)
 {
 	QQuickItem::hoverEnterEvent(e);
 	m_pointerInside = true;
-	if (m_keyCaptureMode == QLatin1String("on"))
-		m_released = false;
+	rearmShortcuts();
 	updateCapture();
 }
 
@@ -940,7 +976,6 @@ void RdpView::hoverLeaveEvent(QHoverEvent* e)
 		updateCapture();
 		return;
 	}
-	m_released = false;
 	const bool held = m_inhibit.held();
 	updateCapture();
 	if (held)
@@ -967,6 +1002,19 @@ void RdpView::wheelEvent(QWheelEvent* e)
 }
 
 namespace {
+void traceInput(const QKeyEvent* event, bool down)
+{
+	static const bool enabled = [] {
+		const char* value = std::getenv("OMAREMOTE_TRACE_INPUT");
+		return value && std::strcmp(value, "1") == 0;
+	}();
+	if (!enabled || event->nativeScanCode() < 8)
+		return;
+	const quint32 evdev = event->nativeScanCode() - 8;
+	if (evdev == 29 || evdev == 57 || evdev == 58 || evdev == 97 || evdev == 122 || evdev == 123)
+		qInfo("input-trace qt-ingress evdev=%u down=%d repeat=%d", evdev, int(down), int(event->isAutoRepeat()));
+}
+
 // The modifiers a key event can carry without its key having been pressed here: evdev codes of
 // the left and right key, and the left one's keysym. Only Shift and Ctrl are ever added (what a
 // sent shortcut needs); Super is only lifted when it was passed on: without the connection's
@@ -1013,6 +1061,7 @@ bool rdpMappingKeySupported(quint32 key)
 
 void RdpView::keyPressEvent(QKeyEvent* e)
 {
+	traceInput(e, true);
 	// On Wayland (and X11) the native scan code is the XKB keycode: evdev + 8.
 	const quint32 code = e->nativeScanCode();
 	if (code < 8)
@@ -1053,7 +1102,7 @@ void RdpView::keyPressEvent(QKeyEvent* e)
 		}
 		if (release)
 		{
-			m_released = true;
+			m_captureOverride = CaptureOverride::Released;
 			updateCapture();
 			m_stalePressed.insert(evdev);
 			e->accept();
@@ -1072,19 +1121,37 @@ void RdpView::keyPressEvent(QKeyEvent* e)
 	    (m_inputProfile == QLatin1String("windows") || m_inputProfile == QLatin1String("linux") ||
 	     m_inputProfile == QLatin1String("macos") || m_inputProfile == QLatin1String("custom")))
 	{
+		// Apple Screen Sharing has no Hangul key and no Unicode insert: it turns a keysym
+		// into a virtual key of the current layout. Only an explicit macOS profile, and only
+		// the Hangul/Hanja keys, become the input-source chord. CapsLock is never substituted.
+		const bool macosChord = m_sessionProtocol == QLatin1String("vnc") &&
+		                        m_inputProfile == QLatin1String("macos") && !m_macInputHelper &&
+		                        (evdev == 122 || evdev == 123);
 		const QString triggers[] = {m_inputTrigger1, m_inputTrigger2};
 		const QString actions[] = {m_inputAction1, m_inputAction2};
+		bool userMapped = false;
+		for (const QString& trigger : triggers)
+		{
+			bool parsed = false;
+			userMapped = userMapped || (trigger.toUInt(&parsed) == evdev && parsed);
+		}
 		for (int i = 0; i < 2; ++i)
 		{
 			bool ok = false;
 			const quint32 trigger = triggers[i].toUInt(&ok);
-			if (!ok || !trigger || trigger != evdev || e->isAutoRepeat() || m_pressed.contains(evdev))
+			const bool synthesize = macosChord && i == 0 && !userMapped;
+			if (!synthesize && (!ok || !trigger || trigger != evdev))
+				continue;
+			if (e->isAutoRepeat() || m_pressed.contains(evdev))
 				continue;
 			QList<QPair<quint32, quint32>> action;
 			QSet<quint32> seen;
-			const auto parts = actions[i].split(QLatin1Char('+'));
+			const auto parts = synthesize
+			                       ? QStringList{QStringLiteral("29:65507"), QStringLiteral("57:32")}
+			                       : actions[i].split(QLatin1Char('+'));
 			if (parts.isEmpty() || parts.size() > 8)
-				break;
+				continue;
+			bool malformed = false;
 			for (const QString& part : parts)
 			{
 				const auto pair = part.trimmed().split(QLatin1Char(':'));
@@ -1094,14 +1161,14 @@ void RdpView::keyPressEvent(QKeyEvent* e)
 				if (pair.size() != 2 || !keyOk || !symOk || !key || key > 767 || !sym || seen.contains(key) ||
 				    (m_sessionProtocol == QLatin1String("rdp") && !rdpMappingKeySupported(key)))
 				{
-					action.clear();
+					malformed = true;
 					break;
 				}
 				seen.insert(key);
 				action.append({key, sym});
 			}
-			if (action.isEmpty())
-				break;
+			if (malformed || action.isEmpty())
+				continue;
 			m_mappedPressed.insert(evdev);
 			QList<quint32> owned;
 			for (const auto& item : action)
@@ -1122,6 +1189,7 @@ void RdpView::keyPressEvent(QKeyEvent* e)
 				send("key 1 " + QByteArray::number(item.first) + ' ' + QByteArray::number(item.second));
 				owned.append(item.first);
 			}
+			// Release the last key first so Control is still down when Space goes up.
 			for (auto it = owned.crbegin(); it != owned.crend(); ++it)
 				send("key 0 " + QByteArray::number(*it));
 			e->accept();
@@ -1181,6 +1249,7 @@ void RdpView::keyPressEvent(QKeyEvent* e)
 
 void RdpView::keyReleaseEvent(QKeyEvent* e)
 {
+	traceInput(e, false);
 	if (e->isAutoRepeat())
 	{
 		e->accept();
@@ -1244,7 +1313,7 @@ void RdpView::focusInEvent(QFocusEvent* e)
 {
 	QQuickItem::focusInEvent(e);
 	m_keyboardBlurred = false;
-	m_released = false;
+	rearmShortcuts();
 	updateCapture();
 	// Bring the remote toggle keys in line with ours; Qt has no lock-state query, so Num Lock on
 	// and the rest off is the common case, and the keys themselves still toggle normally.

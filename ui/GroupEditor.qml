@@ -363,6 +363,22 @@ Rectangle {
                     }
                 }
                 FormRow {
+                    label: "Wheel sensitivity"
+                    help: "Multiplier 0.25–8; leave unset to inherit."
+                    Input {
+                        maximumLength: Limits.size
+                        placeholderText: "unset"
+                        text: root.value("vncWheelScale")
+                        onTextEdited: {
+                            var n = Number(text)
+                            if (text.trim() === "")
+                                root.set("vncWheelScale", "")
+                            else if (isFinite(n) && n >= 0.25 && n <= 8)
+                                root.set("vncWheelScale", n)
+                        }
+                    }
+                }
+                FormRow {
                     label: "View only"
                     Segment { value: root.boolValue("viewOnly"); options: root.onOff; onPicked: function (v) { root.setBool("viewOnly", v) } }
                 }

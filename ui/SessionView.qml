@@ -111,6 +111,7 @@ Item {
         focus: root.current
         sessionProtocol: root.session ? root.session.protocol : ""
         inputProfile: root.connection ? (root.connection.inputProfile || "default") : "default"
+        macInputHelper: !!root.connection && !!root.connection.vncMacInputHost
         inputTrigger1: root.connection ? (root.connection.inputTrigger1 || "") : ""
         inputAction1: root.connection ? (root.connection.inputAction1 || "") : ""
         inputTrigger2: root.connection ? (root.connection.inputTrigger2 || "") : ""
@@ -275,8 +276,9 @@ Item {
         else if (event.key === Qt.Key_PageUp) root.navigate("previous")
         else if (event.key === Qt.Key_End && live) view.sendCtrlAltDel()
         else if (event.key === Qt.Key_Escape && view.shortcutsCaptured) view.releaseShortcuts()
-        // One chord both ways: release while captured, take back while the release key left them.
-        else if (event.key === Qt.Key_G) view.shortcutsCaptured ? view.releaseShortcuts() : view.rearmShortcuts()
+        // One chord both ways: release while captured (or asked), ask otherwise — an "auto"
+        // RDP/VNC session's way in. A false (off, no session) leaves G unmatched, for the remote.
+        else if (event.key === Qt.Key_G) return view.toggleShortcuts(event.isAutoRepeat)
         else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && live) root.toggleFullscreen()
         else if (event.key === Qt.Key_K) root.navigate("keys")
         else if (event.key === Qt.Key_N) root.navigate("quick")

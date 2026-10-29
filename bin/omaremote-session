@@ -158,6 +158,7 @@ DEFAULTS = {
     "hotkey": "",            # the Hyprland shortcut of a hotkey window ("SUPER + ALT + W"), this system's
     "vncScaling": "fit",     # fit | native | resize
     "vncQuality": "auto",    # auto | high | low
+    "vncMacInputHost": "",   # machine-local SSH alias for the optional physical-key helper
     "viewOnly": False,
     "notThisComputer": "",   # Gliff: "host:port" said to be another computer (a clone with this one's ssh host
                              # keys); counts only while the connection still goes there; this system's only
@@ -292,6 +293,7 @@ def resolve(conn, data):
         raise ValueError("invalid inputProfile setting")
     validate_input_mappings(out)
     validate_rdp_input_mappings(out)
+    validate_mac_input(out)
     if not conn.get("port"):
         out["port"] = DEFAULT_PORTS.get(out.get("protocol") or "rdp", 3389)
 
@@ -380,8 +382,8 @@ def mark_connected(conn_id, path=LAST_CONNECTED):
 # itself (unlockAfter).
 LOCAL_KEYS = ("username", "domain", "credential", "savePassword", "gatewayUser", "gatewayDomain",
               "gatewaySavePassword", "extraArgs", "sshArgs", "sshKey", "lastConnected", "hotkey", "ignoreCert",
-              "security", "gliffServer", "unlockAfter", "notThisComputer")
-GROUP_LOCAL_SETTINGS = ("gatewayUser", "gatewayDomain", "extraArgs", "ignoreCert", "security", "unlockAfter")
+              "security", "gliffServer", "unlockAfter", "notThisComputer", "vncMacInputHost")
+GROUP_LOCAL_SETTINGS = ("gatewayUser", "gatewayDomain", "extraArgs", "ignoreCert", "security", "unlockAfter", "vncMacInputHost")
 # Where a connection signs in. A synced change to these, on a connection or group that signs in here
 # with a saved password or a credential set, waits for the user: it would send those credentials to
 # another server.
@@ -489,7 +491,7 @@ ID_RE = re.compile(r"^(?!-)[A-Za-z0-9_-]{1,64}$")
 LIMITS = {"name": 256, "host": 253, "address": 1024, "hostList": 2048, "user": 1024, "domain": 512,
           "password": 2048, "port": 5, "size": 5, "args": 4096, "path": 4096, "shortcut": 128,
           "standard": 256}
-FIELD_LIMITS = {"name": "name", "group": "name", "host": "host", "gateway": "host", "port": "port",
+FIELD_LIMITS = {"name": "name", "group": "name", "host": "host", "gateway": "host", "port": "port", "vncMacInputHost": "host",
                 "username": "user", "gatewayUser": "user", "domain": "domain",
                 "gatewayDomain": "domain", "kdc": "hostList", "sshArgs": "args", "extraArgs": "args",
                 "sshKey": "path", "hotkey": "shortcut", "width": "size", "height": "size",
@@ -722,6 +724,11 @@ def merge(local, incoming, now=None, allow_deletions=(), allow_address=()):
         or shares more, compared as a session would use them (a move into another group, new here
         or with a gateway or sharing of its own, counts), and this system signs in there, before or
         after it (new: old's sign-in with ic's fields)."""
+        try:
+            validate_mac_input(dict(DEFAULTS, **_effective(new, groups)))
+        except ValueError as error:
+            report["errors"].append(f"{system}: skipped connection {plain(str(new.get('name') or new.get('host')))[:40]!r}: {error}")
+            return True
         was, will = _effective(old, groups_before), _effective(ic, groups)
         if not _widens(will, was) or address_ok(old["id"]) \
                 or not (_signs_in_here(old, groups_before) or _signs_in_here(new, groups)):
@@ -814,6 +821,7 @@ def merge(local, incoming, now=None, allow_deletions=(), allow_address=()):
                 for member in members(name):
                     validate_input_mappings(dict(candidate, **member))
                     validate_rdp_input_mappings(dict(candidate, **member))
+                    validate_mac_input(dict(candidate, **member))
             except ValueError as error:
                 report["errors"].append(f"{system}: skipped group {plain(str(name))[:40]!r}: {error}")
                 continue
@@ -853,6 +861,7 @@ def merge(local, incoming, now=None, allow_deletions=(), allow_address=()):
                 try:
                     for member in members(name):
                         validate_input_mappings(dict(DEFAULTS, **member))
+                        validate_mac_input(dict(DEFAULTS, **member))
                 except ValueError as error:
                     report["errors"].append(f"{system}: skipped group {plain(str(name))[:40]!r} deletion: {error}")
                     continue
@@ -2724,6 +2733,17 @@ def check_host(value, what="host"):
     return value
 
 
+def validate_mac_input(conn):
+    host = conn.get("vncMacInputHost", "")
+    if not isinstance(host, str):
+        raise ValueError("invalid vncMacInputHost setting")
+    if not host:
+        return
+    if conn.get("protocol") != "vnc" or conn.get("inputProfile") != "macos":
+        raise ValueError("Mac input helper requires VNC and the explicit macOS input profile")
+    check_host(host, "Mac input SSH host")
+
+
 def plain(value):
     """Text with its control characters (line breaks included) turned into spaces."""
     return CONTROL_RE.sub(" ", value or "")
@@ -2855,6 +2875,7 @@ def build_args(conn, password=None, auto_scale=100, tab=None, gateway_password=N
 def build_vnc_config(conn, password=None):
     """Settings for omaremote-vnc, as key=value lines (fed on stdin)."""
     c = dict(DEFAULTS, **conn)
+    validate_mac_input(c)
     if not c["host"].strip():
         raise ValueError("connection has no host")
     host = check_host(c["host"])
@@ -2868,6 +2889,11 @@ def build_vnc_config(conn, password=None):
         lines.append(f"username={c['username']}")
     if password:
         lines.append(f"password={password}")
+    if c["vncMacInputHost"]:
+        argv = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=5",
+                "-o", "ServerAliveCountMax=2", "--", check_host(c["vncMacInputHost"], "Mac input SSH host"),
+                "omaremote-mac-input", "--stdio"]
+        lines.extend(f"macInputArg={arg}" for arg in argv)
     return check_lines(lines)
 
 

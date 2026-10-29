@@ -179,6 +179,15 @@ Rectangle {
 
     function save() {
         var c = Object.assign({}, d)
+        c.vncMacInputHost = String(c.vncMacInputHost || "").trim()
+        if (c.vncMacInputHost && (!isVnc || c.inputProfile !== "macos")) {
+            error = "Mac input helper requires VNC and the explicit macOS input profile. Clear its SSH host to disable it."
+            return
+        }
+        if (c.vncMacInputHost && !/^(?!-)[A-Za-z0-9._%:@\[\]-]{1,253}$/.test(c.vncMacInputHost)) {
+            error = "Mac input SSH host: enter a valid SSH host name or alias, not command text."
+            return
+        }
         if (!validInputMapping(c.inputTrigger1 || "", c.inputAction1 || "") ||
             !validInputMapping(c.inputTrigger2 || "", c.inputAction2 || "") ||
             (c.inputTrigger1 && c.inputTrigger1 === c.inputTrigger2)) {
@@ -537,6 +546,22 @@ Rectangle {
                     }
                 }
                 FormRow {
+                    inherited: root.fromGroup("vncWheelScale")
+                    label: "Wheel sensitivity"
+                    help: "Scale received VNC angle deltas (0.25–8×); 1× keeps existing behavior. Pixels are not converted."
+                    visible: root.isVnc
+                    Input {
+                        maximumLength: Limits.size
+                        placeholderText: "1"
+                        text: String(root.d.vncWheelScale === undefined ? 1 : root.d.vncWheelScale)
+                        onTextEdited: {
+                            var n = Number(text)
+                            if (text.trim() !== "" && isFinite(n) && n >= 0.25 && n <= 8)
+                                root.set("vncWheelScale", n)
+                        }
+                    }
+                }
+                FormRow {
                     inherited: root.fromGroup("viewOnly")
                     label: "View only"
                     help: "Watch without sending input"
@@ -718,6 +743,17 @@ Rectangle {
                     }
                 }
                 FormRow {
+                    label: "Mac input SSH host"
+                    visible: root.isVnc
+                    help: "Optional, this computer only. Requires the explicit macOS input profile, working SSH key/agent authentication, omaremote-mac-input installed on the Mac's SSH PATH, and manual Accessibility approval there. Empty disables it. Keyboard uses SSH exclusively; screen, mouse and clipboard remain VNC. No automatic install or permission changes."
+                    Input {
+                        maximumLength: Limits.host
+                        placeholderText: "SSH host/alias (empty: disabled)"
+                        text: root.d.vncMacInputHost || ""
+                        onTextEdited: root.set("vncMacInputHost", text)
+                    }
+                }
+                FormRow {
                     inherited: root.fromGroup("inputTrigger1")
                     label: "Mapping 1 source"
                     visible: !root.isSsh && root.d.inputProfile !== "default"
@@ -728,7 +764,7 @@ Rectangle {
                     inherited: root.fromGroup("inputAction1")
                     label: "Mapping 1 action"
                     visible: !root.isSsh && root.d.inputProfile !== "default"
-                    help: "Ordered evdev:decimal X keysym pairs separated by +. Example 29:65507+57:32 (Ctrl+Space); on macOS enable the matching Input Sources shortcut. This is unverified guidance, not an automatic fallback."
+                    help: "Ordered evdev:decimal X keysym pairs separated by +. Without the Mac input helper, VNC with the macOS profile maps Hangul/Hanja keys to Control+Space unless a source mapping matches. Explicit mappings also apply with the helper. CapsLock is not mapped automatically. The Mac shortcut must match; live Korean composition remains unverified."
                     Input { maximumLength: Limits.shortcut; placeholderText: "29:65507+57:32"; text: root.d.inputAction1 || ""; onTextEdited: root.set("inputAction1", text) }
                 }
                 FormRow {

@@ -341,25 +341,94 @@ already, listed twice or not usable say so. The keymap sheet (`?`) runs them too
 **Keyboard capture** (RDP, VNC and Gliff): *Auto* keeps the existing Gliff-only behavior; *On*
 captures keys while a desktop tab is focused, including compositor shortcuts, and *Off* disables
 capture. It needs Wayland shortcut-inhibit support. The configured session release chord lets keys reach
-the compositor, and `ctrl+alt+g` toggles capture: release while captured, take it back after. The
+the compositor, and `ctrl+alt+g` toggles capture: release while captured, take it back after. In
+*Auto* on RDP and VNC, where the pointer alone never asks, the same chord asks for capture for the
+focused desktop (and gives it back again) without changing the stored setting. The
 existing extra-release preference applies to captured desktop sessions too. For
 RDP, capture determines whether the separate **Super key** setting can send Super to the remote.
 
 **Input profile and mappings** (RDP, VNC, Gliff): choose Default, Windows, Linux, macOS or Custom
-yourself; the protocol never selects an OS. Default leaves input unchanged. Other profiles do not
-enable a mapping by themselves. Up to two optional mappings can each name a local **evdev** key
+yourself; the protocol never selects an OS. Default leaves input unchanged. Windows, Linux and
+Custom require explicit mappings. Up to two optional mappings can each name a local **evdev** key
 number and an ordered remote action, expressed as decimal `evdev:keysym` pairs joined with `+`.
 Both fields must be filled to enable a mapping; clear both to disable it. For example, `29:65507+57:32`
-describes Ctrl+Space; it is only a suggestion, not a verified macOS shortcut or automatic fallback.
-On the Mac, enable and check the desired shortcut under System Settings → Keyboard → Keyboard
-Shortcuts → Input Sources. Verify the actual locally delivered source key first: CapsLock is not
-assumed, and a local IME or compositor may consume it. RDP/Gliff use the evdev values; VNC uses the
-keysyms and requires compatible server keymaps. `65329` and `65332` are the X Hangul and Hanja
-keysyms. Already-held modifiers stay held; generated keys are paired. SSH remains unchanged.
+describes Ctrl+Space. For VNC only, the explicitly selected macOS profile maps Hangul/Hanja
+evdev keys 122/123 to Control+Space when no user mapping targets that key. Ordinary letter keysyms
+remain unchanged; locally composed Hangul syllables are not substituted as Unicode keysyms.
+Configure the Mac's System Settings → Keyboard → Keyboard Shortcuts → Input Sources → Select
+the previous input source to Control+Space, or supply an explicit mapping for its actual shortcut.
+A user mapping targeting that key takes precedence, even if its action is unusable; CapsLock is
+never substituted on its own. Without mappings, other profiles retain native Hangul/Hanja delivery.
+Live macOS switching and subsequent Korean typing remain unverified.
 RDP mappings reject unsupported scancodes and Super actions: Super delivery is gated by capture
 and the separate Super key setting. Use supported actions rather than an unreported substitution.
 Profiles and mappings travel with connections through duplication, export/import and sync. No
 remote input-source switch, IME behavior or touchpad fix is claimed without a live test.
+
+### Optional Mac physical-key helper (VNC)
+
+For a Mac whose Apple Korean IME does not compose ordinary VNC keys, an optional
+Mac-side helper posts physical virtual-key events at CoreGraphics' HID event entry.
+The Apple input source remains responsible for composition: no Unicode text, replacement
+IME, or automatic input-source shortcut is sent. Live Korean composition still requires
+acceptance on your Mac; permission or a successful build alone does not prove it.
+
+This is **off by default**. Set a connection's **Mac keyboard SSH host**
+(`vncMacInputHost`) only for VNC with an explicitly selected **macOS** input profile.
+Use an SSH alias configured for key/agent authentication and a previously verified host key;
+BatchMode prevents password/permission prompts. This machine-local setting is not inherited
+from groups or activated by import/sync. Display, mouse and clipboard stay on VNC;
+all keyboard input uses the helper exclusively. Startup/protocol/unsupported-key errors
+fail the session visibly, never silently switch keyboard input back to RFB.
+
+Build **on the Mac**, with Xcode Command Line Tools (Apple SDK and `clang++`), from
+this checkout. These are manual commands, not operations OMARemote performs:
+
+```sh
+make -C native/mac-input
+make -C native/mac-input install PREFIX="$HOME/.local"
+"$HOME/.local/bin/omaremote-mac-input" --check
+```
+
+Installation copies one executable into a user-owned directory: no sudo, launch service,
+remote server changes, or permission grants. The fixed remote command is
+`omaremote-mac-input --stdio`, not a configurable shell command. **Noninteractive SSH
+often has a different PATH** from Terminal. Manually configure the Mac login account's
+noninteractive shell PATH to include your chosen install directory; check it from the client:
+
+```sh
+ssh -T -o BatchMode=yes -- YOUR_MAC_ALIAS 'command -v omaremote-mac-input'
+ssh -T -o BatchMode=yes -- YOUR_MAC_ALIAS omaremote-mac-input --check
+```
+
+`--check` only preflights Accessibility/event-posting permission: it posts no keys and
+does not prompt. If denied, manually review System Settings → Privacy & Security →
+Accessibility for the executable/SSH hosting process identified by macOS, then reconnect.
+SSH execution must reach the logged-in interactive Mac user's GUI session; approval in
+Terminal is not proof that the SSH execution context is authorized. A locked/login screen,
+Secure Input, OS policy, or a different login session may still prevent delivery.
+Nothing resets TCC, approves permissions, or restarts the Mac automatically.
+
+The fixed physical map covers ANSI letters, digits and punctuation, left/right modifiers,
+Caps Lock, navigation, F1–F20, keypad keys, ISO section and JIS-specific positions.
+It preserves physical positions, not printed character labels. Hangul/Hanja evdev 122/123
+have no dedicated Apple physical virtual key: configure an explicit mapping to your Mac's
+actual supported shortcut if needed; helper mode does not use the legacy automatic
+Control+Space mapping. Num Lock, Scroll Lock, Print Screen, Pause, media keys and F21+
+are unsupported and cause an explicit error. Caps Lock toggles once per fresh press,
+not on repeated downs; ordinary repeated downs are marked as repeats.
+
+Protocol v1 announces `ready 1`; bounded ASCII LF-terminated commands are
+`key <0|1> <evdev>`, `release`, and `ping` (reply `pong`). No text/keys are logged.
+The helper releases tracked injected keys on release, EOF, termination, malformed input,
+or 15 seconds without a complete valid command; the client sends a heartbeat every five
+seconds. SIGKILL, machine failure, or revoked permission cannot guarantee cleanup.
+`make -C native/mac-input check` runs the full portable parser/map unit executable
+without posting events; macOS injection/IME acceptance is a separate manual check.
+
+Platform references: [Apple CGEvent keyboard API](https://developer.apple.com/documentation/coregraphics/cgevent/init(keyboardeventsource:virtualkey:keydown:)),
+[Apple event-posting preflight](https://developer.apple.com/documentation/coregraphics/cgpreflightposteventaccess()),
+and [Apple IOHID modifier flags](https://github.com/apple-oss-distributions/IOHIDFamily/blob/main/IOHIDSystem/IOKit/hidsystem/IOLLEvent.h).
 
 ## RDP
 
@@ -535,8 +604,9 @@ accept ssh from yours, as for an SSH connection.
 - **Keys**: your own keyboard layout goes along. While the tab has the keyboard and the pointer is
   on the picture, the tab takes Hyprland's shortcuts, `super` included, as Gliff's own client does.
   Moving the pointer off gives them back, and so do `ctrl+alt+esc` and `shift+esc` (Settings ›
-  Keyboard: or *Double Esc*, or nothing else); a click takes them again, and so does `ctrl+alt+g`,
-  which takes them back after a release too.
+  Keyboard: or *Double Esc*, or nothing else); a click or pointer/focus return takes them again, and
+  so does `ctrl+alt+g`, which also asks for capture in the first place (on RDP and VNC too, in
+  *Auto*: an *Off* desktop stays off).
 - **Clipboard** both ways, text, images and files: nothing moves until you paste, slow pastes show
   their progress with a cancel button, files land in `~/.cache/omaremote/clipboard/`. It is shared
   only while the tab has the keyboard, and never a password manager's selection.

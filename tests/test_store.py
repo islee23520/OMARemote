@@ -30,7 +30,9 @@ ShellRoot {
             var copy = copyId ? Store.storedGet(copyId) : null
             console.log("PROBE " + JSON.stringify({ loaded: Store.loaded, broken: Store.broken,
                 count: Store.stored.length, last: c ? c.lastConnected : null, port: c ? c.port : null,
-                copyProfile: copy ? copy.inputProfile : null, copyAction: copy ? copy.inputAction1 : null }))
+                copyProfile: copy ? copy.inputProfile : null, copyAction: copy ? copy.inputAction1 : null,
+                macInputHost: c ? c.vncMacInputHost : null, copyMacInputHost: copy ? copy.vncMacInputHost : null,
+                inheritedMacInputHost: Store.inherited("Desk").vncMacInputHost }))
             Store.setUi("pinned", true)
             done.start()
         }
@@ -136,6 +138,20 @@ class StoreFile(unittest.TestCase):
         self.assertEqual(probe["copyProfile"], "macos")
         self.assertEqual(probe["copyAction"], "29:65507+57:32")
         self.assertEqual(len(json.loads(after)["connections"]), 2)
+
+    def test_mac_input_host_is_connection_local_and_survives_duplicate(self):
+        text = json.dumps({"connections": [{"id": "c1", "host": "a.lan", "protocol": "vnc",
+                                             "inputProfile": "macos", "vncMacInputHost": "my-mac", "group": "Desk"}],
+                           "groups": {"Desk": {"settings": {"vncMacInputHost": "not-inherited"}}}})
+        probe, after, _ = self.run_store(text)
+        self.assertEqual(probe["macInputHost"], "my-mac")
+        self.assertEqual(probe["copyMacInputHost"], "my-mac")
+        self.assertEqual(probe["inheritedMacInputHost"], "")
+        self.assertEqual([c["vncMacInputHost"] for c in json.loads(after)["connections"]], ["my-mac", "my-mac"])
+
+    def test_mac_input_host_defaults_empty(self):
+        probe, _, _ = self.run_store(json.dumps({"connections": [{"id": "c1", "host": "a.lan"}]}))
+        self.assertEqual(probe["macInputHost"], "")
 
     def test_a_new_file_is_only_the_users(self):
         old = os.umask(0o022)

@@ -2,7 +2,7 @@
 
 This fork (`islee23520/OMARemote`, tracking `RFdeGroot/OMARemote`) addresses three user-reported problems in the running v0.9.15 package: keys reaching the local Wayland session instead of a remote canvas, unreliable remote Hangul/English switching with local fcitx5, and unreliable drag/scroll in VNC.
 
-**M1 and the M2 profile/mapping module are implemented; live acceptance pending.** M3 wheel-residue and pointer-cleanup changes have landed; the reported live touchpad cause remains unconfirmed. No remote IME switch or CapsLock trigger is confirmed. See [ToDo.md](ToDo.md) for remaining work.
+**M1 and the M2 profile/mapping module are implemented; full live acceptance pending.** M3 wheel-residue and pointer-cleanup changes have landed; the reported live touchpad cause remains unconfirmed. In the user's Mac VNC session Control+Space changes the input-source indicator to Korean, but subsequent typing remains Latin. CapsLock evdev 58 reaches Qt and VNC; that does not establish successful CapsLock switching. See [ToDo.md](ToDo.md) and the current helper module below.
 
 ## Evidence and limits
 
@@ -23,6 +23,7 @@ Local configuration inspection found US and Hangul input methods in fcitx5 and `
 - The existing RDP path includes Korean evdev/scancode mappings. That is evidence of an available transport path, not proof the running session receives the key or the remote IME switches.
 - The X keysyms are `XK_Hangul = 0xff31` and `XK_Hangul_Hanja = 0xff34`; `0x0f31`/`0x0f32` are not substitutes. VNC server/keymap support still matters.
 - macOS input-source shortcuts are configurable. Caps Lock and Control+Space are examples, not a universal automatic mapping or fallback sequence.
+- The implemented VNC-only behavior for an explicitly selected `macos` profile maps Hangul/Hanja evdev keys 122/123 to Control+Space only when no user mapping targets that key. A user mapping targeting that key takes precedence even if its action is unusable; without mappings, other profiles retain native delivery. The user confirmed input-source switching via Control+Space, not Korean composition: ordinary typing still produces Latin. No Unicode-syllable substitution or item-level IME flag experiment is retained.
 - SSH is a terminal, not a remote desktop IME interface. Retain local IME composition and committed text by default; do not reinterpret an SSH target OS as a reason to disable it.
 
 ### Mouse
@@ -48,6 +49,13 @@ No global exclusive Wayland grab, compositor configuration changes, new remote p
 ## Implementation map
 
 See [Design.md](Design.md) for settings, editor/status UI, Keymap integration, lifecycle, and protocol boundaries. See [ToDo.md](ToDo.md) for ordered milestones and live acceptance. The stack is QML/quickshell, a Qt6 C++ plugin, Python session management, and protocol-specific native processes. New host shortcuts belong in `ui/Keymap.qml` and the README key tables when implemented. Project documentation is English.
+
+## Current module — SSH Mac keyboard helper
+
+Live user verification established that Control+Space changes the Mac input-source indicator but ordinary VNC keys still produce Latin text. A client-only composition fix is not established. The user selected an optional Mac-side physical-key helper.
+
+Stack: existing Qt/QML and Python settings, C++ VNC SSH subprocess, and a standalone macOS Objective-C++ helper using CoreGraphics physical virtual-key events. SSH provides authentication and encryption; no listening port or new credential store. A connection-local `vncMacInputHost` SSH alias explicitly enables keyboard-only routing; display, mouse and clipboard remain VNC. Empty leaves all existing behavior unchanged. No remote install, Accessibility approval, or server setting changes occur automatically. Helper readiness and protocol agreement are required, with no silent keyboard fallback.
+
 
 ## Primary references
 

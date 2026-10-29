@@ -14,13 +14,27 @@ Add connection settings through the existing Python connection validation/storag
 
 Mappings are two optional source evdev codes and ordered evdev:keysym pairs; default profile leaves all input unchanged. Validation rejects malformed settings. Existing RDP `grabKeyboard` remains separate from capture. Item-scoped IME behavior remains open.
 
+### Optional Mac physical-key helper
+
+`vncMacInputHost` is a connection-only, machine-local SSH destination/alias, empty by default. It is excluded from groups, export, sync and imported activation. Nonempty requires VNC and an explicit `macos` profile. The editor explains SSH key/agent authentication, remote helper installation, and manual Accessibility approval. No automatic target discovery.
+
+Python constructs `ssh -T -o BatchMode=yes -o ServerAliveInterval=5 -o ServerAliveCountMax=2 -- <host> omaremote-mac-input --stdio`; the native VNC backend owns its pipes/process. Remote executable is fixed, not user shell text. The remote helper is installed manually on the SSH command PATH.
+
+Protocol v1 is bounded ASCII lines: helper announces `ready 1`, client sends `key <0|1> <evdev>`, `release`, and `ping`; helper answers `pong`. Keys carry physical identity, not typed text. All key/CAD paths use the selected transport exclusively, including keysym-zero events. Qt's legacy macOS Hangul/Hanja-to-Control+Space default is bypassed in helper mode; explicit user mappings remain applicable. Unsupported keys, malformed lines, permission denial, process exit or handshake mismatch fail visibly without RFB fallback.
+
+The helper tracks injected keys and left/right modifier flags; EOF, explicit release, termination and expired liveness release every held key. Native UI detach/focus loss and VNC shutdown release helper keys. Parent queues are bounded and nonblocking so SSH cannot freeze framebuffer processing. Tests distinguish physical-helper routing from legacy RFB packets; only live Mac composition establishes Korean success.
+
+Helper readiness precedes RFB initialization so SSH startup does not delay consumption of the first framebuffer response. Credential prompts pump helper heartbeats. The existing synchronous libvncclient decoder and its configured read timeout are retained; a long blocked/decode operation can starve heartbeat processing and visibly end the helper session. The remote lease still releases held keys; no independent decoder-liveness guarantee is claimed.
+
+
+
 ## Editor, status, and Keymap
 
 In `ui/Editor.qml`, group the proposed controls under input settings:
 
 - Capture request with help explaining compositor support, canvas focus, and the difference from RDP Super forwarding. Show only applicable desktop capture controls; do not silently enable capture for SSH.
 - Explicit profile selector with `Default / unchanged` as the initial value. Explain that the profile is a user choice, not OS detection.
-- Editable source-trigger and Hangul/Hanja action mappings, with a custom combination editor using established shortcut-field conventions. Choose the source only after verifying the effective active binding and actual raw events/IME consumption; CapsLock remains an unconfirmed candidate and need not be the remote action. macOS has no mandatory Caps Lock or Control+Space default; the user chooses the remote input-source shortcut.
+- Editable source-trigger and Hangul/Hanja action mappings, with a custom combination editor using established shortcut-field conventions. Choose the source only after verifying the effective active binding and actual raw events/IME consumption; CapsLock remains an unconfirmed candidate and need not be the remote action. The explicit macOS profile on VNC supplies Control+Space for Hangul/Hanja evdev keys 122/123 only when no user mapping targets that key. A user mapping targeting that key takes precedence even if its action is unusable. The Mac's configured shortcut must match; live switching and subsequent Korean typing remain unverified.
 - Explain server prerequisites where relevant, including VNC keymap support for Hangul/Hanja. A configured action is not proof of remote IME state.
 
 In the session UI/status area, show **requested mode** separately from **actual state**: off, waiting for canvas focus, unavailable/unsupported, requested but not activated, active, or compositor-deactivated. Derive active only from protocol activation. Do not display a remote Hangul/English state that has not been observed. Provide a visible release-capture action and an accessible explanation when capture is unavailable.
@@ -52,7 +66,7 @@ For raw desktop input, choose item-scoped Qt behavior that prevents local compos
 | Backend | Delivery contract |
 | --- | --- |
 | RDP | Preserve evdev/scancode delivery; existing Korean evdev 122/123 mappings are available. Verify the remote layout/IME and actual emitted sequence. Do not switch every key to Unicode to solve toggle delivery. |
-| VNC | Use actual keysyms `0xff31` (Hangul), `0xff34` (Hangul_Hanja) where selected, with paired press/release. A server may require matching keymap entries; show guidance rather than claiming success. |
+| VNC | Preserve native keysyms, including `0xff31` (Hangul) and `0xff34` (Hangul_Hanja), with paired press/release. Only the explicit macOS profile supplies the Hangul/Hanja Control+Space chord when no user mapping targets that key; a matching user mapping takes precedence even if its action is unusable. Do not substitute locally composed syllables as Unicode keysyms. Remote shortcut/keymap support and live macOS behavior remain unverified. |
 | Gliff | Preserve evdev/keymap semantics; do not send VNC keysyms into its transport. Validate configured combinations against the remote layout. |
 | SSH | Retain local IME composition and committed terminal text, including dead keys and Korean. Do not inject desktop IME toggle sequences or disable local IME merely because a profile names an OS. If existing composition is incomplete, inspect Qt-to-terminal committed-text delivery before designing its fix. |
 

@@ -8,6 +8,7 @@
 //   scaling (fit|native|resize: resize asks the server to follow the tab's size)
 
 #include "../common/link.hpp"
+#include "macinput.hpp"
 
 #include <rfb/rfbclient.h>
 
@@ -35,6 +36,7 @@ struct Session
 {
 	std::map<std::string, std::string> cfg;
 	oma::Link link;
+	MacInput macInput;
 	rfbClient* client = nullptr;
 	oma::Framebuffer frame;
 	bool connected = false;
@@ -302,6 +304,16 @@ static void flush_resize()
 
 // ---------------------------------------------------------------- input
 
+static void trace_input(uint32_t evdev, bool down, bool dropped = false)
+{
+	static const bool enabled = [] {
+		const char* value = std::getenv("OMAREMOTE_TRACE_INPUT");
+		return value && std::strcmp(value, "1") == 0;
+	}();
+	if (enabled && (evdev == 29 || evdev == 57 || evdev == 58 || evdev == 97 || evdev == 122 || evdev == 123))
+		log("input-trace %s evdev=%u down=%d", dropped ? "vnc-drop-keysym-zero" : "vnc-send", evdev, int(down));
+}
+
 static void send_pointer(int x, int y)
 {
 	SendPointerEvent(g.client, std::max(0, x), std::max(0, y), g.buttons);
@@ -369,13 +381,26 @@ static void handle_line(const std::string& line)
 	{
 		const bool down = num(1) != 0;
 		const uint32_t evdev = uint32_t(num(2));
+		if (g.macInput.enabled())
+		{
+			if (g.macInput.key(down, evdev))
+			{
+				if (down) g.pressed[evdev] = 0;
+				else g.pressed.erase(evdev);
+			}
+			return;
+		}
 		if (down)
 		{
 			const uint32_t keysym = w.size() >= 4 ? uint32_t(strtoul(w[3].c_str(), nullptr, 10)) : 0;
 			if (keysym == 0)
+			{
+				trace_input(evdev, true, true);
 				return;
+			}
 			g.pressed[evdev] = keysym;
 			SendKeyEvent(g.client, keysym, TRUE);
+			trace_input(evdev, true);
 		}
 		else
 		{
@@ -383,16 +408,31 @@ static void handle_line(const std::string& line)
 			if (it == g.pressed.end())
 				return;
 			SendKeyEvent(g.client, it->second, FALSE);
+			trace_input(evdev, false);
 			g.pressed.erase(it);
 		}
 	}
 	else if (cmd == "cad" && input)
 	{
+		if (g.macInput.enabled())
+		{
+			const uint32_t keys[] = { 29, 56, 111 }; // Control_L, Alt_L, Delete
+			for (uint32_t key : keys)
+				if (!g.pressed.count(key)) g.macInput.key(true, key);
+			for (int i = 2; i >= 0; --i)
+				if (!g.pressed.count(keys[i])) g.macInput.key(false, keys[i]);
+			return;
+		}
 		const uint32_t keys[] = { 0xffe3, 0xffe9, 0xffff }; // Control_L, Alt_L, Delete
 		for (uint32_t k : keys)
 			SendKeyEvent(g.client, k, TRUE);
 		for (int i = 2; i >= 0; i--)
 			SendKeyEvent(g.client, keys[i], FALSE);
+	}
+	else if ((cmd == "blur" || cmd == "release-keys") && g.macInput.enabled())
+	{
+		g.macInput.release();
+		g.pressed.clear();
 	}
 	else if (cmd == "clip" && w.size() >= 2)
 		send_clipboard(unb64(w[1]));
@@ -404,7 +444,9 @@ static void handle_line(const std::string& line)
 
 static bool stop_asking()
 {
-	return g.quit != 0;
+	// Credential prompts can remain open for minutes; they must not starve the
+	// already authenticated keyboard helper while no input is being injected.
+	return g.quit != 0 || (g.macInput.enabled() && g.macInput.ready && !g.macInput.pump());
 }
 
 // "auth <kind> <user> -"; the answer is "auth-answer <user> <domain> <password>".
@@ -473,7 +515,10 @@ int main()
 	{
 		const size_t eq = line.find('=');
 		if (eq != std::string::npos)
-			g.cfg[line.substr(0, eq)] = line.substr(eq + 1);
+		{
+			if (line.substr(0, eq) == "macInputArg") g.macInput.args.push_back(line.substr(eq + 1));
+			else g.cfg[line.substr(0, eq)] = line.substr(eq + 1);
+		}
 	}
 	signal(SIGTERM, on_signal);
 	signal(SIGINT, on_signal);
@@ -484,6 +529,35 @@ int main()
 	if (!g.link.listen(getenv("OMAREMOTE_SOCKET")))
 		return 136;
 	g.link.onAttach = replay;
+	g.link.onClientChanged = [] {
+		// Replacing a UI is also an ownership loss, even if the new UI is attached.
+		if (g.macInput.enabled())
+		{
+			g.macInput.release();
+			g.pressed.clear();
+		}
+	};
+
+	// Complete SSH startup before libvncclient requests its first framebuffer update.
+	// Otherwise a slow SSH handshake leaves the VNC stream unserviced after authentication.
+	if (g.macInput.enabled())
+	{
+		bool ok = g.macInput.start();
+		while (ok && !g.macInput.ready && !g.quit)
+		{
+			ok = g.macInput.pump();
+			for (const auto& l : g.link.poll()) handle_line(l);
+			if (ok && !g.macInput.ready) poll(nullptr, 0, 20);
+		}
+		if (!ok || g.quit)
+		{
+			g.macInput.stop();
+			const int rc = g.quit ? 11 : 147;
+			g.link.send("state failed " + std::to_string(rc));
+			g.link.close();
+			return rc;
+		}
+	}
 
 	// 8 bits per sample, 3 samples, 4 bytes per pixel; the shifts make the memory order B G R X.
 	rfbClient* client = rfbGetClient(8, 3, 4);
@@ -536,9 +610,10 @@ int main()
 	int argc = 0;
 	if (!rfbInitClient(client, &argc, nullptr))
 	{
-		const int rc = g.quit ? 145 : g.authFailed ? 132 : 131;
+		const int rc = g.quit ? 145 : !g.macInput.error.empty() ? 147 : g.authFailed ? 132 : 131;
 		log("connection failed: %s", g.lastError.empty() ? "unknown error" : g.lastError.c_str());
 		g.link.send("state failed " + std::to_string(rc));
+		g.macInput.stop();
 		g.link.close();
 		return rc;
 	}
@@ -555,8 +630,13 @@ int main()
 	int rc = 0;
 	while (!g.quit)
 	{
+		if (g.macInput.enabled() && !g.macInput.pump())
+		{
+			rc = 147;
+			break;
+		}
 		// libvncclient may hold the next message already read from the socket.
-		const int timeout = client->buffered > 0 ? 0 : 250;
+		const int timeout = client->buffered > 0 ? 0 : g.macInput.enabled() ? 20 : 250;
 		pollfd fds[3] = { { client->sock, POLLIN, 0 },
 			              { g.link.listenFd(), POLLIN, 0 },
 			              { g.link.clientFd(), POLLIN, 0 } };
@@ -579,6 +659,7 @@ int main()
 		rc = 11;
 	g.connected = false;
 	g.wheelX = g.wheelY = 0;
+	g.macInput.stop();
 	log("session ended");
 	g.link.send("state ended " + std::to_string(rc));
 	rfbClientCleanup(client);

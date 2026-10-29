@@ -78,12 +78,13 @@ The manager window:
 | --- | --- |
 | plugin/rdpview.cpp | the QML item drawing a session: frame, keys (`keyPressEvent`, chords for sent shortcuts), mouse, clipboard (`shareClipboard`, `sendClipboard` through clipread, `MaxClipBytes` both ways), cursor |
 | plugin/yuvnode.cpp, plugin/shaders/yuv.* | Gliff pictures drawn from the decoder's dmabufs: EGL import, the shader converts (BT.709, Dual420 recombined); RdpView `addSurface`, `showSurfaces`, `updatePaintNode` |
-| plugin/shortcutinhibit.cpp | Wayland keyboard-shortcuts inhibition: actual `active`/`inactive` events; RdpView mode/focus gating and key cleanup; capture release/rearm (`releaseShortcuts`/`rearmShortcuts`, the ctrl+alt+g session toggle); `plugin/rdpview-keys-test.cpp` = offscreen `rdpview-keys-test` keyboard and mouse-button boundary regression (focus/visibility/grab/session loss releases held buttons, pointer leave does not) |
+| plugin/shortcutinhibit.cpp | Wayland keyboard-shortcuts inhibition: actual `active`/`inactive` events; RdpView mode/focus gating and key cleanup; capture release/rearm/toggle (`releaseShortcuts`/`rearmShortcuts`/`toggleShortcuts`, the ctrl+alt+g session toggle, which in auto asks for capture too); `plugin/rdpview-keys-test.cpp` = offscreen `rdpview-keys-test` keyboard and mouse-button boundary regression (focus/visibility/grab/session loss releases held buttons, pointer leave does not) |
 | plugin/clipread.cpp | `oma::readClipboard`: the only way the UI reads the clipboard (wl-paste in its own process, size and time limits); never `QClipboard::text()` (tests/test_clipboard.py checks) |
 | plugin/pasteguard.cpp | `PasteGuard.guard` (cuts a field loose from clipboard changes), `paste` (wl-paste, 16 KiB, 2 s, one line; refused whole when it does not fit `maximumLength`) |
 | rdp/main.cpp | FreeRDP client: `handle_line` (UI lines: key, mouse, clip, size), `rdp_scancode` |
 | rdp/gfxguard.cpp | `oma::guard_gfx`: wraps FreeRDP's RDPGFX CreateSurface (8192 a side, 2 GiB for all surfaces with their progressive tiles) and SurfaceToCache (128 MiB of cache, read back from gdi's entries); gfxguard-test.cpp = rdp-gfx-test |
 | vnc/main.cpp | libvncclient client; signed per-axis angle-delta residue emits whole 120-unit wheel clicks, preserving held-button masks and resetting at connection boundaries; pixel-only scrolling is unchanged |
+| mac-input/main.mm, protocol.hpp | optional macOS-only `omaremote-mac-input --stdio`: Accessibility/posting preflight (`--check` posts nothing), fixed physical evdev-to-Apple virtual-key map, HID-entry events and left/right flags, repeat/Caps Lock tracking, bounded v1 parser and 15-second inactivity/EOF/signal key release; no text or RFB fallback |
 | ssh/main.cpp | ssh in a pty + libvterm terminal: keys, selection/copy, scrollback; `start_ssh`/`run_ssh`, a lost connection tried again (`lost_words`, `transient_words`, `wait_serving`) |
 | gliff/main.cpp | Gliff client (Omarchy desktops): `ssh … gliff-server --stdio` in pipes (`start_server`, reconnect with backoff), two H.264 decoders (VA-API or CPU; `kMaxStreamW/H` = what Hello asks for, `pick_format` refuses a picture larger than its StreamConfig before FFmpeg allocates), pictures as dmabufs when the UI says `gpu 1` (`show_gpu`, `export_surface`, `release`) or converted into shared memory, UI lines to Gliff input, `send_stats` (key=value words; a Ping a second, `on_pong`, `health`: noreply / congested / latency) |
 | gliff/msg.hpp, cbor.hpp | Gliff's protocol v1 by hand (gliff-proto's msg.rs/frame.rs, clipboard messages); test.cpp = gliff-proto-test, its fixtures |
@@ -94,6 +95,12 @@ The manager window:
 | common/link.cpp | the socket and shared-memory frame shared by all session processes; `limit_memory` (RLIMIT_DATA `kMaxSessionData`, 4 GiB; a failed `new` exits 147) first in each main |
 
 Build: `ninja -C native/build`.
+The Mac keyboard helper is separate from the Linux native build: on macOS,
+`make -C native/mac-input` uses Apple `clang++` plus ApplicationServices/CoreGraphics;
+`make -C native/mac-input install PREFIX="$HOME/.local"` installs one user-owned executable.
+Its `protocol-test.cpp` full portable parser/map module runs with
+`make -C native/mac-input check` (no macOS SDK or event injection required).
+See README's optional Mac helper setup for noninteractive SSH PATH and manual permissions.
 
 ## Tests, tools, docs
 
